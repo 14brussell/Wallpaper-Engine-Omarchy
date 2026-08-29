@@ -944,6 +944,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.loading
           text: "Scanning Workshop…"
           color: root.dim
@@ -952,6 +953,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: !root.loading && root.filteredWallpapers.length === 0
           text: "No wallpapers found. Subscribe in Steam Wallpaper Engine."
           color: root.dim
@@ -1030,6 +1032,7 @@ Item {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   anchors.centerIn: parent
                   visible: previewImage.status !== Image.Ready
                   text: "󰸉"
@@ -1044,6 +1047,7 @@ Item {
                 spacing: 2
 
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: modelData.title || modelData.id
                   color: root.fg
@@ -1053,6 +1057,7 @@ Item {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   text: modelData.id
                   color: root.dim
                   font.family: root.fontFamily
@@ -1165,6 +1170,7 @@ Item {
               spacing: Style.space(6)
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: "Pick a Workshop wallpaper"
                 color: root.fg
@@ -1172,6 +1178,7 @@ Item {
                 font.pixelSize: Style.font.body
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: "Select one on the left. Engine settings below always apply; audio and scene properties appear only when that wallpaper supports them."
                 color: root.dim
@@ -1205,6 +1212,7 @@ Item {
                 fontFamily: root.fontFamily
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: root.wallpaperTitle
                 color: root.fg
@@ -1213,6 +1221,7 @@ Item {
                 elide: Text.ElideRight
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: {
                   var parts = [String(root.selectedWallpaperId)]
@@ -1230,6 +1239,7 @@ Item {
                 elide: Text.ElideRight
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 visible: root.hasWallpaper
                 text: "Editing saved settings for this display. Adjust, then Apply."
@@ -1264,6 +1274,7 @@ Item {
               }
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: "Every setting in this tab is saved and launched only for " + root.displayName + "."
                 color: root.dim
@@ -1322,6 +1333,7 @@ Item {
               }
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: "Bottom is recommended for Omarchy. Top and overlay can cover desktop content."
                 color: root.dim
@@ -1356,6 +1368,7 @@ Item {
               }
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: root.hasAudio
                   ? "Audio settings apply only to this display's wallpaper process."
@@ -1441,6 +1454,7 @@ Item {
               }
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: "From project.json / --list-properties. Passed as --set-property on Apply. No global speed flag."
                 color: root.dim
@@ -1535,6 +1549,7 @@ Item {
                     spacing: Style.space(2)
 
                     Text {
+                      textFormat: Text.PlainText
                       text: {
                         var label = modelData.label || modelData.key
                         var t = String(modelData.type || "")
@@ -1617,6 +1632,7 @@ Item {
                 spacing: Style.space(2)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "Ignore fullscreen app IDs"
                   color: root.dim
                   font.family: root.fontFamily
@@ -1678,6 +1694,7 @@ Item {
               }
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: "Custom property (optional)"
                 color: root.dim
@@ -1768,6 +1785,7 @@ Item {
               }
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 visible: !root.busy && !root.wallpaperSelected
                 text: "Select a wallpaper, then Apply to save settings and start the engine."
@@ -1778,6 +1796,7 @@ Item {
               }
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 visible: !root.busy && root.wallpaperSelected && !root.engineRunning
                 text: "Saves and starts this display only. Other displays keep running unchanged."
@@ -1788,6 +1807,7 @@ Item {
               }
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 visible: root.busy || root.localStatus.length > 0
                 text: {

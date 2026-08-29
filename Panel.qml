@@ -797,6 +797,7 @@ Item {
               spacing: Style.space(12)
 
               Text {
+                textFormat: Text.PlainText
                 text: "󰸉"
                 color: root.fg
                 font.family: root.fontFamily
@@ -808,6 +809,7 @@ Item {
                 spacing: Style.space(2)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "Wallpaper Engine"
                   color: root.fg
                   font.family: root.fontFamily
@@ -816,6 +818,7 @@ Item {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   text: root.themeName.length
                     ? ("Omarchy theme · " + root.themeName)
                     : "linux-wallpaperengine on Hyprland"
@@ -833,6 +836,7 @@ Item {
                 radius: Style.cornerRadius
 
                 Text {
+                  textFormat: Text.PlainText
                   id: statusText
                   anchors.centerIn: parent
                   text: root.statusLabel
@@ -917,6 +921,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: !root.engineRunning && !root.applyInFlight && root.statusMessage.length === 0
               text: root.hasConfiguredDisplays
@@ -929,6 +934,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: root.progressText.length > 0
               text: root.progressText
@@ -966,6 +972,7 @@ Item {
               }
 
               Text {
+                textFormat: Text.PlainText
                 visible: root.currentMonitorTitle.length > 0
                 text: "Editing " + root.currentMonitorTitle
                 color: Color.accent
@@ -976,6 +983,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: root.displayCount === 0
               Layout.fillWidth: true
               Layout.topMargin: Style.space(10)
@@ -1049,6 +1057,7 @@ Item {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     id: tabLabel
                     anchors.centerIn: parent
                     anchors.verticalCenterOffset: tabDelegate.selected ? -1 : 0
@@ -1175,6 +1184,7 @@ Item {
             spacing: Style.space(2)
 
             Text {
+              textFormat: Text.PlainText
               text: "Wallpaper folders"
               color: root.fg
               font.family: root.fontFamily
@@ -1183,6 +1193,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               text: "Add another Steam library or Workshop content folder. Automatic locations stay enabled."
               color: root.dim
@@ -1205,6 +1216,7 @@ Item {
         PanelSeparator { Layout.fillWidth: true; foreground: root.fg }
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: "Paste a Steam library folder, steamapps folder, or …/workshop/content/431960."
           color: root.dim
@@ -1246,6 +1258,7 @@ Item {
           clip: true
 
           Text {
+            textFormat: Text.PlainText
             anchors.centerIn: parent
             visible: root.wallpaperDirsDraft.length === 0
             text: "No additional folders"
@@ -1292,6 +1305,7 @@ Item {
               spacing: Style.space(8)
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: modelData
                 color: root.fg
@@ -1313,6 +1327,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           visible: root.wallpaperDirsError.length > 0
           text: root.wallpaperDirsError

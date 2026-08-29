@@ -40,8 +40,21 @@ test_additional_wallpaper_folders() {
   local library="$TEST_ROOT/Steam Library"
   local workshop="$library/steamapps/workshop/content/431960"
   local output="$TEST_ROOT/wallpaper-folders-output"
-  mkdir -p "$home" "$workshop/123456"
-  printf '{"title":"External Test","type":"scene"}\n' >"$workshop/123456/project.json"
+  local private_preview="$TEST_ROOT/private-preview.png"
+  mkdir -p "$home" "$workshop/123456" "$workshop/123457" \
+    "$workshop/123458" "$workshop/123459"
+  printf 'safe preview\n' >"$workshop/123456/preview.png"
+  printf 'private preview\n' >"$private_preview"
+  printf '{"title":"External <b>Test</b>","type":"scene","preview":"preview.png"}\n' \
+    >"$workshop/123456/project.json"
+  jq -cn --arg preview "$private_preview" \
+    '{title:"Absolute preview",type:"scene",preview:$preview}' \
+    >"$workshop/123457/project.json"
+  ln -s "$private_preview" "$workshop/123458/preview.png"
+  printf '{"title":"Escaping symlink","type":"scene","preview":"preview.png"}\n' \
+    >"$workshop/123458/project.json"
+  jq -cn '{title:"Line one\n999999\tInjected",type:"scene"}' \
+    >"$workshop/123459/project.json"
 
   HOME=$home "$ROOT/bin/we" set-wallpaper-dirs "$library" >/dev/null
 
@@ -50,8 +63,14 @@ test_additional_wallpaper_folders() {
       '.additional == [$root] and (.effective | index($root) != null)' \
       >/dev/null
   HOME=$home "$ROOT/bin/we" list --json \
-    | jq -e --arg root "$workshop/123456" \
-      'any(.[]; .id == "123456" and .path == $root)' \
+    | jq -e \
+      --arg root "$workshop/123456" \
+      --arg preview "$workshop/123456/preview.png" \
+      'any(.[]; .id == "123456" and .path == $root
+        and .title == "External <b>Test</b>" and .preview == $preview)
+      and all(.[] | select(.id == "123457" or .id == "123458"); .preview == "")
+      and any(.[]; .id == "123459" and .title == "Line one 999999 Injected")
+      and (map(select(.id == "999999")) | length == 0)' \
       >/dev/null
 
   if HOME=$home "$ROOT/bin/we" set-wallpaper-dirs "$TEST_ROOT/not-mounted" \
@@ -65,6 +84,16 @@ test_additional_wallpaper_folders() {
   HOME=$home "$ROOT/bin/we" set-wallpaper-dirs >/dev/null
   HOME=$home "$ROOT/bin/we" wallpaper-dirs --json \
     | jq -e '.additional == []' >/dev/null
+}
+
+test_qml_text_is_plain() {
+  local qml text_count plain_count
+  for qml in "$ROOT/Panel.qml" "$ROOT/DisplayTab.qml"; do
+    text_count=$(grep -Ec '^[[:space:]]*Text \{' "$qml")
+    plain_count=$(grep -Ec '^[[:space:]]*textFormat: Text\.PlainText$' "$qml")
+    [[ $text_count -eq $plain_count ]] \
+      || fail "every Text element must explicitly use Text.PlainText: $qml"
+  done
 }
 
 test_legacy_preflight() {
@@ -188,6 +217,7 @@ test_uninstall_validates_all_paths_before_purge() {
 
 test_symlinked_cli
 test_additional_wallpaper_folders
+test_qml_text_is_plain
 test_legacy_preflight
 test_uninstall_preserves_data
 test_uninstall_purges_data

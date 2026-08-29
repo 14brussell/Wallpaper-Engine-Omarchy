@@ -297,7 +297,8 @@ we_wallpaper_title() {
   if [[ -n $dir && -d $dir ]]; then
     project="$dir/project.json"
     if [[ -f $project ]]; then
-      jq -r '.title // .name // empty' "$project" 2>/dev/null && return 0
+      jq -r '(.title // .name // empty) | select(type == "string")' \
+        "$project" 2>/dev/null && return 0
     fi
     basename "$dir"
     return 0
@@ -305,21 +306,35 @@ we_wallpaper_title() {
   printf '%s\n' "$path_or_id"
 }
 
-# Preview image from project.json (relative → absolute), if present on disk.
+# Print a canonical regular file only when it remains inside the canonical
+# project directory. This rejects traversal and symlinks that escape the
+# Workshop item even when the final target exists.
+we_canonical_project_file() {
+  local project_dir=${1:-} candidate=${2:-} root resolved
+  [[ -n $project_dir && -n $candidate ]] || return 1
+  root=$(realpath -e -- "$project_dir" 2>/dev/null) || return 1
+  [[ -d $root ]] || return 1
+  resolved=$(realpath -e -- "$candidate" 2>/dev/null) || return 1
+  [[ -f $resolved ]] || return 1
+  case "$resolved" in
+    "$root"/*) printf '%s\n' "$resolved" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Preview image from project.json, if it resolves inside the Workshop item.
+# Absolute metadata paths are never accepted, even when they point back into
+# the item; project.json must describe its assets relative to its own root.
 we_wallpaper_preview() {
-  local path=$1
-  local project preview
+  local path=$1 project preview
+  path=$(realpath -e -- "$path" 2>/dev/null) || return 0
+  [[ -d $path ]] || return 0
   project="$path/project.json"
   [[ -f $project ]] || return 0
-  preview=$(jq -r '.preview // .preview_image // empty' "$project" 2>/dev/null || true)
-  [[ -n $preview ]] || return 0
-  if [[ $preview == /* && -f $preview ]]; then
-    printf '%s\n' "$preview"
-    return 0
-  fi
-  if [[ -f $path/$preview ]]; then
-    printf '%s\n' "$path/$preview"
-  fi
+  preview=$(jq -r '(.preview // .preview_image // empty) | select(type == "string")' \
+    "$project" 2>/dev/null || true)
+  [[ -n $preview && $preview != /* ]] || return 0
+  we_canonical_project_file "$path" "$path/$preview" 2>/dev/null || true
 }
 
 # linux-wallpaperengine requires an explicit Wallpaper Engine project type.
@@ -357,6 +372,15 @@ we_list_wallpapers() {
       seen_ids[$id]=1
       title=$(we_wallpaper_title "$path")
       preview=$(we_wallpaper_preview "$path")
+      # Keep the legacy TSV interface structurally safe when third-party
+      # project metadata contains control characters. JSON consumers are
+      # built from these records, so no field may introduce another record.
+      title=${title//$'\t'/ }
+      title=${title//$'\r'/ }
+      title=${title//$'\n'/ }
+      preview=${preview//$'\t'/ }
+      preview=${preview//$'\r'/ }
+      preview=${preview//$'\n'/ }
       printf '%s\t%s\t%s\t%s\n' "$id" "$title" "$path" "$preview"
     done
   done < <(we_workshop_dirs | awk 'NF && !seen[$0]++')
@@ -666,7 +690,10 @@ we_effective_displays_json() {
 we_status_json() {
   we_load_config
   local monitors_json effective_json pids_json engine_displays_json
-  monitors_json=$(we_monitors_json 2>/dev/null || echo '[]')
+  # we_monitors_json prints [] and returns false when no compositor probe is
+  # available. Do not append a second fallback array to that valid output.
+  monitors_json=$(we_monitors_json 2>/dev/null || true)
+  [[ -n $monitors_json ]] || monitors_json='[]'
   effective_json=$(we_effective_displays_json)
   pids_json=$(we_engine_pids | jq -R . | jq -cs 'map(tonumber? // empty)')
   [[ -n $pids_json ]] || pids_json='[]'
@@ -1509,7 +1536,8 @@ we_wallpaper_best_still() {
 
 # Any on-disk preview.* (project.json first, then jpg/png/webp, then gif).
 we_wallpaper_preview_file() {
-  local dir=$1 f
+  local dir=$1 f resolved
+  dir=$(realpath -e -- "$dir" 2>/dev/null) || return 1
   [[ -d $dir ]] || return 1
   f=$(we_wallpaper_preview "$dir" 2>/dev/null || true)
   if [[ -n $f && -f $f ]]; then
@@ -1518,8 +1546,9 @@ we_wallpaper_preview_file() {
   fi
   for f in "$dir"/preview.jpg "$dir"/preview.jpeg "$dir"/preview.png \
            "$dir"/preview.webp "$dir"/preview.bmp "$dir"/preview.gif; do
-    if [[ -f $f ]]; then
-      printf '%s\n' "$f"
+    resolved=$(we_canonical_project_file "$dir" "$f" 2>/dev/null || true)
+    if [[ -n $resolved ]]; then
+      printf '%s\n' "$resolved"
       return 0
     fi
   done
