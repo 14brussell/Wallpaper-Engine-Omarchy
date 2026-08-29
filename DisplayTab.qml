@@ -945,6 +945,7 @@ Item {
 
         ListView {
           id: wallpaperList
+          readonly property bool hasVerticalOverflow: contentHeight > height + 0.5
           Layout.fillWidth: true
           Layout.fillHeight: true
           clip: true
@@ -953,7 +954,9 @@ Item {
           boundsBehavior: Flickable.StopAtBounds
           QQC.ScrollBar.vertical: QQC.ScrollBar {
             id: wallpaperScrollBar
-            policy: QQC.ScrollBar.AsNeeded
+            policy: wallpaperList.hasVerticalOverflow
+              ? QQC.ScrollBar.AsNeeded
+              : QQC.ScrollBar.AlwaysOff
 
             contentItem: Rectangle {
               implicitWidth: Style.space(6)
@@ -1092,6 +1095,7 @@ Item {
 
       Flickable {
         id: settingsFlick
+        readonly property bool hasVerticalOverflow: contentHeight > height + 0.5
         Layout.fillWidth: true
         Layout.fillHeight: true
         clip: true
@@ -1101,7 +1105,9 @@ Item {
         flickableDirection: Flickable.VerticalFlick
         QQC.ScrollBar.vertical: QQC.ScrollBar {
           id: settingsScrollBar
-          policy: QQC.ScrollBar.AsNeeded
+          policy: settingsFlick.hasVerticalOverflow
+            ? QQC.ScrollBar.AsNeeded
+            : QQC.ScrollBar.AlwaysOff
 
           contentItem: Rectangle {
             implicitWidth: Style.space(6)
