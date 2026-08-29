@@ -48,6 +48,11 @@ omarchy plugin enable io.github.14brussell.wallpaper-engine
 
 The installer copies the plugin into its canonical directory and links `omarchy-we` and `we-omarchy` into `~/.local/bin`. Do not symlink the repository into `~/.config/omarchy/plugins/`; QML may reject the path because of filename case differences. Re-run the installer after changing the source tree.
 
+If the installer finds the legacy `wallpaper-engine-omarchy` plugin ID, it stops
+before making changes and prints the exact migration commands. Remove the legacy
+plugin first, then re-run the installer; the shared wallpaper configuration is
+preserved across the ID migration.
+
 If the panel does not appear, rescan plugins:
 
 ```bash
@@ -68,6 +73,17 @@ omarchy plugin remove io.github.14brussell.wallpaper-engine
 ```
 
 Run the helper first, while the plugin files still exist. It restores the theme background and removes plugin-owned integrations. Configuration and runtime state are kept.
+
+For a factory-clean removal, explicitly purge the plugin configuration and
+runtime state before asking Omarchy to remove the checkout:
+
+```bash
+~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/uninstall.sh --purge
+omarchy plugin remove io.github.14brussell.wallpaper-engine
+```
+
+`--purge` is irreversible and does not uninstall Omarchy, Wallpaper Engine,
+`linux-wallpaperengine`, or any other dependency.
 
 ## Usage
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Remove Wallpaper Engine's Omarchy integrations before removing the plugin.
-# User configuration and state are deliberately preserved.
+# User configuration and state are preserved unless --purge is explicit.
 
 set -euo pipefail
 
@@ -23,11 +23,12 @@ MENU_MARKER="  // Added by wallpaper-engine-omarchy"
 
 usage() {
   cat <<'EOF'
-Usage: uninstall.sh
+Usage: uninstall.sh [--purge]
 
 Stops Wallpaper Engine, restores the Omarchy theme background when possible,
 and removes only verified plugin-owned hooks, menu entries, and command links.
-Configuration and runtime state are preserved.
+Configuration and runtime state are preserved by default. --purge permanently
+removes both plugin-owned data directories after the integrations are removed.
 EOF
 }
 
@@ -149,9 +150,42 @@ remove_owned_link() {
   fi
 }
 
+validate_purge_data_dir() {
+  local path=$1 label=$2 base
+  base=$(basename -- "$path")
+  if [[ -z $path || $path != /* || $path == / || $path == "$HOME" || $base != wallpaper-engine ]]; then
+    printf 'Refusing to purge unsafe %s path: %s\n' "$label" "$path" >&2
+    return 1
+  fi
+}
+
+purge_data_dir() {
+  local path=$1 label=$2
+  if [[ -e $path || -L $path ]]; then
+    rm -rf -- "$path"
+    printf 'Purged %s: %s\n' "$label" "$path"
+  else
+    printf '%s already absent: %s\n' "$label" "$path"
+  fi
+}
+
+purge_plugin_data() {
+  validate_purge_data_dir "$CONFIG_DIR" configuration
+  if [[ $STATE_DIR != "$CONFIG_DIR" ]]; then
+    validate_purge_data_dir "$STATE_DIR" 'runtime state'
+  fi
+
+  purge_data_dir "$CONFIG_DIR" configuration
+  if [[ $STATE_DIR != "$CONFIG_DIR" ]]; then
+    purge_data_dir "$STATE_DIR" 'runtime state'
+  fi
+}
+
 main() {
+  local purge=0
   case ${1:-} in
     -h|--help) usage; return 0 ;;
+    --purge) purge=1 ;;
     '') ;;
     *) usage >&2; return 2 ;;
   esac
@@ -164,10 +198,16 @@ main() {
   remove_owned_link "$BIN_DIR/omarchy-we"
   remove_owned_link "$BIN_DIR/we-omarchy"
 
+  if (( purge )); then
+    purge_plugin_data
+  fi
+
   echo
   echo "Wallpaper Engine integrations removed."
-  echo "Preserved configuration: $CONFIG_DIR"
-  echo "Preserved runtime state: $STATE_DIR"
+  if (( ! purge )); then
+    echo "Preserved configuration: $CONFIG_DIR"
+    echo "Preserved runtime state: $STATE_DIR"
+  fi
   echo "The plugin checkout was not removed. Finish with:"
   echo "  omarchy plugin remove $PLUGIN_ID"
 }

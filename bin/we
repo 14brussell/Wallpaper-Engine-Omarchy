@@ -6,7 +6,8 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_PATH=$(readlink -f -- "${BASH_SOURCE[0]}")
+ROOT="$(cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd -P)"
 # shellcheck source=../lib/common.sh
 source "$ROOT/lib/common.sh"
 

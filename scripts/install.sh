@@ -17,6 +17,28 @@ if [[ -f $SOURCE/manifest.json ]]; then
   [[ -n ${_id:-} ]] && PLUGIN_ID=$_id
 fi
 DEST="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/${PLUGIN_ID}"
+LEGACY_PLUGIN_ID="wallpaper-engine-omarchy"
+LEGACY_DEST="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/${LEGACY_PLUGIN_ID}"
+
+refuse_legacy_install() {
+  [[ $PLUGIN_ID != "$LEGACY_PLUGIN_ID" ]] || return 0
+  [[ -e $LEGACY_DEST || -L $LEGACY_DEST ]] || return 0
+
+  cat >&2 <<EOF
+Legacy Wallpaper Engine plugin detected:
+  $LEGACY_DEST
+
+Remove the legacy integration before installing $PLUGIN_ID:
+  $LEGACY_DEST/bin/we revert
+  $LEGACY_DEST/scripts/install-hooks remove
+  $LEGACY_DEST/scripts/we-menu-entry remove
+  omarchy plugin remove $LEGACY_PLUGIN_ID
+
+The shared wallpaper configuration and runtime state are preserved. Re-run this
+installer after the legacy plugin has been removed.
+EOF
+  return 1
+}
 
 copy_tree() {
   local src=$1 dest=$2
@@ -192,6 +214,7 @@ sync_plugin_tree() {
 }
 
 # Refuse to swap code while an apply/revert transaction owns the same plugin.
+refuse_legacy_install
 mkdir -p "$(dirname -- "$DEST")" "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/wallpaper-engine"
 exec 8>"$(dirname -- "$DEST")/.${PLUGIN_ID}.install.lock"
 flock -w 5 8 || { echo "Another plugin install is already running." >&2; exit 1; }
