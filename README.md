@@ -4,8 +4,14 @@ Omarchy shell plugin that plays [Steam Wallpaper Engine](https://store.steampowe
 
 It ships a **Quickshell GUI** (`FloatingWindow`, one tab per Hyprland output), an optional bar widget, Omarchy **Style** menu entries, a gum TUI fallback, and hooks. Browse Workshop wallpapers, set per-display scaling/FPS/clamp/audio/properties, start or stop `linux-wallpaperengine`, and **revert to the current Omarchy theme background**.
 
+## Demo
+
 <p align="center">
-  <img src="assets/screenshots/panel-overview.png" alt="Wallpaper Engine for Omarchy panel showing Workshop wallpapers and per-display controls" width="100%">
+  <a href="assets/wallpaper-engine-for-omarchy-demo.mp4">
+    <img src="preview.png" alt="Watch the Wallpaper Engine for Omarchy demo" width="100%">
+  </a>
+  <br>
+  <a href="assets/wallpaper-engine-for-omarchy-demo.mp4"><strong>▶ Watch the 11-second demo (MP4)</strong></a>
 </p>
 
 Display names and resolutions are detected from each user’s Hyprland setup.
