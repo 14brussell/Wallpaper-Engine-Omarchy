@@ -3,7 +3,7 @@
 # Omarchy never runs plugin post-install hooks — call this explicitly.
 #
 # Qt QML compares the plugin URL to the real filesystem path. A symlink from
-# ~/.config/omarchy/plugins/wallpaper-engine-omarchy → a mixed-case repo
+# ~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine → a mixed-case repo
 # (e.g. .../Wallpaper-Engine-Omarchy) fails with "File name case mismatch"
 # and Service.qml never loads. Always install as a real directory
 # whose name matches the lowercase plugin id.
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-PLUGIN_ID="wallpaper-engine-omarchy"
+PLUGIN_ID="io.github.14brussell.wallpaper-engine"
 if [[ -f $SOURCE/manifest.json ]]; then
   _id=$(sed -n 's/^[[:space:]]*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SOURCE/manifest.json" | head -n1)
   [[ -n ${_id:-} ]] && PLUGIN_ID=$_id
@@ -42,6 +42,7 @@ set_tree_modes() {
     "$root/scripts/we-stage-transition" \
     "$root/scripts/install-hooks" \
     "$root/scripts/install.sh" \
+    "$root/scripts/uninstall.sh" \
     "$root/hooks/post-boot.sh" \
     "$root/hooks/theme-set.sh"
 }
@@ -53,7 +54,7 @@ validate_stage() {
   for f in "$root"/bin/we "$root"/lib/common.sh "$root"/scripts/* "$root"/hooks/*.sh; do
     [[ -f $f ]] || continue
     case "$f" in
-      *.sh|*/we|*/we-menu|*/we-menu-entry|*/we-stage-transition|*/install-hooks)
+      *.sh|*/we|*/we-menu|*/we-menu-entry|*/we-stage-transition|*/install-hooks|*/uninstall.sh)
         bash -n "$f"
         ;;
     esac
@@ -220,6 +221,6 @@ echo "  Config: ~/.config/omarchy/wallpaper-engine/config.json"
 echo
 echo "After editing the source tree, re-run this script to copy into the plugin dir."
 echo "Enable the plugin / bar widget (if not already):"
-echo "  omarchy plugin enable wallpaper-engine-omarchy"
+echo "  omarchy plugin enable $PLUGIN_ID"
 echo
 "$ROOT/bin/we" doctor || true

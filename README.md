@@ -35,16 +35,16 @@ Optional: `"nvidia_workaround": true` in config runs the engine with `__GL_THREA
 
 Omarchy plugins have **no post-install hooks**. After adding the plugin, run the explicit helper once.
 
-**Do not** install by symlink into `~/.config/omarchy/plugins/`. Qt QML compares the plugin URL to the real path; a symlink from lowercase `wallpaper-engine-omarchy` to a mixed-case repo (`Wallpaper-Engine-Omarchy`) can fail with `File name case mismatch`. `install.sh` **copies** into that lowercase plugin-id directory.
+**Do not** install by symlink into `~/.config/omarchy/plugins/`. Qt QML compares the plugin URL to the real path; a symlink from the lowercase plugin-id directory to a mixed-case repo (`Wallpaper-Engine-Omarchy`) can fail with `File name case mismatch`. `install.sh` **copies** into the canonical plugin-id directory.
 
 ```bash
 # From GitHub (clones into ~/.config/omarchy/plugins/<id>/ as a real directory)
 omarchy plugin add https://github.com/14brussell/Wallpaper-Engine-Omarchy.git --enable
-~/.config/omarchy/plugins/wallpaper-engine-omarchy/scripts/install.sh
+~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/install.sh
 
 # Or locally while developing — copy, never ln -sfn
 /path/to/Wallpaper-Engine-Omarchy/scripts/install.sh
-omarchy plugin enable wallpaper-engine-omarchy
+omarchy plugin enable io.github.14brussell.wallpaper-engine
 ```
 
 Re-run `scripts/install.sh` after editing the source tree so QML and hooks pick up the copy. The installer validates a hidden staging tree, exposes it with one atomic replacement, and rolls back if the enabled service does not report the new generation. For an enabled plugin it uses one supported shell restart, avoiding Omarchy's unsafe in-process reload state; it does not request an additional plugin rescan. The script also links `omarchy-we` / `we-omarchy` into `~/.local/bin`.
@@ -62,6 +62,17 @@ Validate before publishing:
 ```bash
 omarchy plugin validate ./Wallpaper-Engine-Omarchy
 ```
+
+## Remove
+
+Run the cleanup helper while the plugin checkout still exists, then let Omarchy remove the git-managed plugin:
+
+```bash
+~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/uninstall.sh
+omarchy plugin remove io.github.14brussell.wallpaper-engine
+```
+
+The helper restores the current Omarchy theme background when possible and removes only verified plugin-owned hooks, Style menu entries, and command links. It deliberately preserves wallpaper configuration in `~/.config/omarchy/wallpaper-engine/` and runtime state in `~/.local/state/omarchy/wallpaper-engine/`.
 
 ## Usage
 
@@ -222,7 +233,8 @@ GUI helpers: `we list --json`, `we status --json`, `we display-config <mon> --js
 ## Layout
 
 ```
-manifest.json          # Omarchy plugin id: wallpaper-engine-omarchy
+manifest.json          # Omarchy plugin id: io.github.14brussell.wallpaper-engine
+preview.png            # Marketplace card/detail preview
 BarWidget.qml          # Bar launcher (toggles panel)
 Panel.qml              # Quickshell GUI — FloatingWindow + Start/Stop/Revert + per-display tabs
 DisplayTab.qml         # One tab’s wallpaper browser + settings + Apply / Clear
@@ -233,6 +245,7 @@ scripts/we-menu        # gum TUI (advanced fallback)
 scripts/we-menu-entry  # Style menu install/remove
 scripts/install-hooks  # post-boot + theme-set
 scripts/install.sh     # copy into plugins/<id>/ + menu + hooks + ~/.local/bin links
+scripts/uninstall.sh   # remove verified integrations before omarchy plugin remove
 hooks/                 # Reference hook scripts
 assets/we-placeholder.png
 ```

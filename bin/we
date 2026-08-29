@@ -10,6 +10,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../lib/common.sh
 source "$ROOT/lib/common.sh"
 
+PLUGIN_ID="io.github.14brussell.wallpaper-engine"
+if [[ -f $ROOT/manifest.json ]]; then
+  manifest_id=$(sed -n 's/^[[:space:]]*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$ROOT/manifest.json" | head -n1)
+  [[ -n ${manifest_id:-} ]] && PLUGIN_ID=$manifest_id
+fi
+
 usage() {
   cat <<'EOF'
 Usage: we <command> [args]
@@ -478,7 +485,7 @@ cmd_revert() {
 
 cmd_panel() {
   if command -v omarchy-shell >/dev/null 2>&1; then
-    omarchy-shell shell summon wallpaper-engine-omarchy ""
+    omarchy-shell shell summon "$PLUGIN_ID" ""
   else
     echo "omarchy-shell not found; open the gum TUI instead: we menu" >&2
     exec "$ROOT/scripts/we-menu"

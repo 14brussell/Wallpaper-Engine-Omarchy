@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "id": "wallpaper-engine-omarchy",
-  "name": "Wallpaper Engine",
+  "id": "io.github.14brussell.wallpaper-engine",
+  "name": "Wallpaper Engine for Omarchy",
   "version": "1.5.0",
   "author": "brussell",
   "license": "MIT",
@@ -14,7 +14,7 @@
     "service": "Service.qml"
   },
   "barWidget": {
-    "displayName": "Wallpaper Engine",
+    "displayName": "Wallpaper Engine for Omarchy",
     "description": "Open the Wallpaper Engine panel (per-display tabs, Workshop browse, revert to theme).",
     "category": "Style",
     "allowMultiple": false,

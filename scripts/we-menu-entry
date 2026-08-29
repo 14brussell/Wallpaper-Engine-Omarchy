@@ -16,7 +16,7 @@ action=${1:-install}
 menu_file=${WE_MENU_FILE:-$HOME/.config/omarchy/extensions/omarchy-menu.jsonc}
 marker='  // Added by wallpaper-engine-omarchy'
 
-plugin_id=wallpaper-engine-omarchy
+plugin_id=io.github.14brussell.wallpaper-engine
 if [[ -f $ROOT/manifest.json ]]; then
   _id=$(sed -n 's/^[[:space:]]*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/manifest.json" | head -n1)
   [[ -n ${_id:-} ]] && plugin_id=$_id

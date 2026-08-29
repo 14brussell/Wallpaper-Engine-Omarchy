@@ -355,7 +355,7 @@ Item {
   function dismiss() {
     try {
       if (shell && typeof shell.hide === "function")
-        shell.hide((manifest && manifest.id) || "wallpaper-engine-omarchy")
+        shell.hide((manifest && manifest.id) || "io.github.14brussell.wallpaper-engine")
       else
         close()
     } catch (e) {

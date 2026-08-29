@@ -9,7 +9,7 @@ import qs.Ui
 // not Bar.findPanelWidget (that path is only for bar-widget-only plugins).
 BarWidget {
   id: root
-  moduleName: "wallpaper-engine-omarchy"
+  moduleName: "io.github.14brussell.wallpaper-engine"
 
   property bool engineActive: false
 
@@ -18,7 +18,7 @@ BarWidget {
     return decodeURIComponent(String(url).replace(/^file:\/\//, "").replace(/\/$/, ""))
   }
   readonly property string weBin: root.pluginRoot + "/bin/we"
-  readonly property string pluginId: root.moduleName || "wallpaper-engine-omarchy"
+  readonly property string pluginId: root.moduleName || "io.github.14brussell.wallpaper-engine"
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
