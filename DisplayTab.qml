@@ -61,6 +61,9 @@ Item {
   property bool draftDirty: false
   /** Draft revision captured by the current Apply/Clear transaction. */
   property int actionDraftRevision: 0
+  /** Preserve an Apply click made while wallpaper capabilities are loading. */
+  property bool applyQueued: false
+  property string queuedApplyWallpaperId: ""
   /** Coalesce reload requests that arrive while display-config is running. */
   property bool configReloadPending: false
   /** Remaining argv vectors after the current we step (set-display then apply). */
@@ -164,6 +167,10 @@ Item {
 
   onSelectedWallpaperIdChanged: {
     var id = String(selectedWallpaperId || "")
+    if (applyQueued && id !== String(queuedApplyWallpaperId || "")) {
+      applyQueued = false
+      queuedApplyWallpaperId = ""
+    }
     // Drop the previous wallpaper's property bag immediately so Apply cannot
     // pass stale --set-property keys (config accumulates them across wallpapers).
     if (id !== String(propertiesWallpaperId || "")) {
@@ -201,6 +208,23 @@ Item {
   function markDraftEdited() {
     draftRevision += 1
     draftDirty = true
+  }
+
+  function continueQueuedApply() {
+    var configReadCurrent = !draftDirty && configProc.running
+      && configProc.draftRevisionAtStart === draftRevision
+    if (!applyQueued || capsLoading || configReadCurrent)
+      return
+    var queuedId = String(queuedApplyWallpaperId || "")
+    applyQueued = false
+    queuedApplyWallpaperId = ""
+    if (!queuedId.length || queuedId !== String(selectedWallpaperId || ""))
+      return
+    Qt.callLater(function() {
+      if (!root.actionsBlocked
+          && queuedId === String(root.selectedWallpaperId || ""))
+        root.applySettings()
+    })
   }
 
   function reload() {
@@ -440,11 +464,9 @@ Item {
 
   function applySettings() {
     if (actionsBlocked || actionProc.running) return
-    if (!draftDirty && configProc.running
-        && configProc.draftRevisionAtStart === draftRevision) {
-      setError("Wait for display settings to load")
-      return
-    }
+    // The shell Button does not take focus on pointer clicks. Explicitly move
+    // focus so editable SpinBoxes commit their current text before argv is read.
+    root.forceActiveFocus(Qt.MouseFocusReason)
     if (!displayName || !displayName.length) {
       setError("No display selected")
       return
@@ -453,8 +475,14 @@ Item {
       setError("Select a wallpaper first")
       return
     }
-    if (capsLoading) {
-      setError("Wait for wallpaper properties to load")
+    var configReadCurrent = !draftDirty && configProc.running
+      && configProc.draftRevisionAtStart === draftRevision
+    if (capsLoading || configReadCurrent) {
+      applyQueued = true
+      queuedApplyWallpaperId = String(selectedWallpaperId)
+      setStatus(capsLoading
+        ? "Loading wallpaper properties — Apply queued"
+        : "Loading display settings — Apply queued")
       return
     }
     actionDraftRevision = draftRevision
@@ -602,6 +630,7 @@ Item {
       var data = JSON.parse(String(raw || "{}"))
       if (!data || typeof data !== "object") {
         wallpaperCaps = ({})
+        continueQueuedApply()
         return
       }
       // Ignore stale responses if selection changed mid-flight.
@@ -620,9 +649,11 @@ Item {
 
       // Drop keys the new wallpaper does not list; seed missing from schema.
       prunePropertiesToListed(data.properties || [], true)
+      continueQueuedApply()
     } catch (e) {
       wallpaperCaps = ({})
       setError("Could not read wallpaper properties")
+      continueQueuedApply()
     }
   }
 
@@ -648,6 +679,7 @@ Item {
         root.setError("Could not read display config")
       if (root.configReloadPending)
         Qt.callLater(root.loadDisplayConfig)
+      root.continueQueuedApply()
     }
   }
 
@@ -687,10 +719,13 @@ Item {
           root.capsLoading = false
           // Don't clobber good caps we already have for this wallpaper.
           if (root.wallpaperCaps
-              && String(root.wallpaperCaps.id || "") === selected)
+              && String(root.wallpaperCaps.id || "") === selected) {
+            root.continueQueuedApply()
             return
+          }
           if (root.wallpaperSelected)
             root.setError("Could not read wallpaper capabilities")
+          root.continueQueuedApply()
           return
         }
         root.parseCapabilities(t)
@@ -709,8 +744,13 @@ Item {
       if (root.wallpaperCaps
           && String(root.wallpaperCaps.id || "") === String(root.selectedWallpaperId || "")) {
         root.capsLoading = false
+        root.continueQueuedApply()
         return
       }
+      root.capsLoading = false
+      if (root.wallpaperSelected)
+        root.setError("Could not read wallpaper capabilities")
+      root.continueQueuedApply()
     }
   }
 
@@ -823,6 +863,7 @@ Item {
       try { capsProc.running = false } catch (e) {}
       root.capsLoading = false
       root.setError("Wallpaper capabilities timed out")
+      root.continueQueuedApply()
     }
   }
 
@@ -911,7 +952,22 @@ Item {
           model: root.filteredWallpapers
           boundsBehavior: Flickable.StopAtBounds
           QQC.ScrollBar.vertical: QQC.ScrollBar {
+            id: wallpaperScrollBar
             policy: QQC.ScrollBar.AsNeeded
+
+            contentItem: Rectangle {
+              implicitWidth: Style.space(6)
+              implicitHeight: Style.space(32)
+              radius: width / 2
+              color: Color.accent
+              opacity: wallpaperScrollBar.pressed || wallpaperScrollBar.hovered ? 1 : 0.82
+
+              Behavior on opacity {
+                NumberAnimation { duration: 100 }
+              }
+            }
+
+            background: Item {}
           }
 
           delegate: BorderSurface {
@@ -1044,7 +1100,22 @@ Item {
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         QQC.ScrollBar.vertical: QQC.ScrollBar {
+          id: settingsScrollBar
           policy: QQC.ScrollBar.AsNeeded
+
+          contentItem: Rectangle {
+            implicitWidth: Style.space(6)
+            implicitHeight: Style.space(32)
+            radius: width / 2
+            color: Color.accent
+            opacity: settingsScrollBar.pressed || settingsScrollBar.hovered ? 1 : 0.82
+
+            Behavior on opacity {
+              NumberAnimation { duration: 100 }
+            }
+          }
+
+          background: Item {}
         }
 
         ColumnLayout {
@@ -1657,9 +1728,7 @@ Item {
                   accent: Color.accent
                   bordered: true
                   enabled: !root.actionsBlocked && root.displayName.length > 0
-                    && root.wallpaperSelected && !root.capsLoading
-                    && (root.draftDirty || !configProc.running
-                      || configProc.draftRevisionAtStart !== root.draftRevision)
+                    && root.wallpaperSelected
                   Layout.fillWidth: true
                   onClicked: root.applySettings()
                 }
