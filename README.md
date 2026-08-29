@@ -180,4 +180,5 @@ hooks/                       Boot and theme hooks
 
 - Mirroring is unavailable because `linux-wallpaperengine` has no general flip option. Wallpaper-specific flip properties still appear when supported.
 - Playback-speed, audio-reactive, and mouse-interactive behavior depends on the wallpaper and `linux-wallpaperengine` support.
-- Wallpapers that do not produce a valid frame during startup are rejected, leaving the previous wallpaper in place.
+- Some Workshop wallpapers can crash the underlying `linux-wallpaperengine` process. Wallpaper Engine projects may contain Scene data, older particle effects, 3D features, scripts, or Web content that the Linux reimplementation does not fully support. Unexpected project data can also expose bugs in the engine. These are upstream compatibility failures, not crashes caused by this plugin; the plugin starts and manages `linux-wallpaperengine`, but does not render the wallpaper.
+- If the engine exits before its first frame, the plugin leaves the previous wallpaper running. Scene wallpapers are retried once with particles disabled, and each display remains isolated in its own process. Engine output is saved under `~/.local/state/omarchy/wallpaper-engine/` for troubleshooting. See the [linux-wallpaperengine issue tracker](https://github.com/Almamu/linux-wallpaperengine/issues) for upstream compatibility reports.
