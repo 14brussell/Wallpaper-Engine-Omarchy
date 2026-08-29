@@ -8,6 +8,8 @@ It ships a **Quickshell GUI** (`FloatingWindow`, one tab per Hyprland output), a
   <img src="assets/screenshots/panel-overview.png" alt="Wallpaper Engine for Omarchy panel showing Workshop wallpapers and per-display controls" width="100%">
 </p>
 
+Display names and resolutions are detected from each user’s Hyprland setup; none are hardcoded by the plugin.
+
 ## Highlights
 
 - Native Omarchy/Quickshell panel with one live tab per Hyprland display.
