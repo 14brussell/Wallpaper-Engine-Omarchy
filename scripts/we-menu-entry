@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# Add or remove Wallpaper Engine entries in Omarchy's user menu extension.
+# Omarchy plugins deliberately have no install hooks, so this is explicit.
+#
+# Entries land under Style (stock root id: style), beside Theme / Background.
+# A JSONC `action` is a leaf — dotted children of that id are unreachable —
+# so revert / TUI are Style siblings (hyphenated), not nested under the GUI row:
+#   style.wallpaper-engine         → opens the Quickshell GUI panel
+#   style.wallpaper-engine-revert  → one-shot revert to theme background
+#   style.wallpaper-engine-tui     → optional gum TUI (advanced; not primary)
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+action=${1:-install}
+menu_file=${WE_MENU_FILE:-$HOME/.config/omarchy/extensions/omarchy-menu.jsonc}
+marker='  // Added by wallpaper-engine-omarchy'
+
+plugin_id=wallpaper-engine-omarchy
+if [[ -f $ROOT/manifest.json ]]; then
+  _id=$(sed -n 's/^[[:space:]]*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/manifest.json" | head -n1)
+  [[ -n ${_id:-} ]] && plugin_id=$_id
+fi
+
+KEY_MAIN=style.wallpaper-engine
+KEY_REVERT=style.wallpaper-engine-revert
+KEY_TUI=style.wallpaper-engine-tui
+
+entry_main="  \"$KEY_MAIN\": {\"icon\":\"󰸉\",\"label\":\"Wallpaper Engine\",\"action\":\"omarchy-shell shell summon $plugin_id\",\"description\":\"Workshop wallpapers via linux-wallpaperengine (GUI)\",\"aliases\":[\"wallpaper-engine\",\"we\"]}"
+entry_revert="  \"$KEY_REVERT\": {\"icon\":\"󰕍\",\"label\":\"Revert to theme background\",\"action\":\"$ROOT/bin/we revert\",\"description\":\"Stop Wallpaper Engine and restore the Omarchy theme background\"}"
+entry_tui="  \"$KEY_TUI\": {\"icon\":\"󰆍\",\"label\":\"Wallpaper Engine (advanced TUI)\",\"action\":\"omarchy-launch-tui --app-id=org.omarchy.wallpaper-engine $ROOT/scripts/we-menu\",\"description\":\"Gum terminal UI fallback for Wallpaper Engine\"}"
+
+# Nested dotted ids (unreachable while the parent is an action) plus the
+# pre-GUI appearance.* id. Also matches current hyphenated sibling ids so
+# uninstall can clear either generation.
+OWNED_LINE_PATTERN='^[[:space:]]*"(appearance\.wallpaper-engine[^"]*|style\.wallpaper-engine([.-](revert|tui))?)"[[:space:]]*:'
+LEGACY_NESTED_PATTERN='^[[:space:]]*"(appearance\.wallpaper-engine[^"]*|style\.wallpaper-engine\.(revert|tui))"[[:space:]]*:'
+
+usage() {
+  echo "Usage: we-menu-entry [install|remove]" >&2
+  exit 1
+}
+
+refresh_menu() {
+  [[ ${WE_SKIP_MENU_REFRESH:-0} == 1 ]] && return
+  command -v omarchy-shell >/dev/null 2>&1 || return
+  timeout -k 1 3 omarchy-shell shell call omarchy.menu refresh "" >/dev/null 2>&1 || true
+}
+
+key_pattern() {
+  local id=$1
+  printf '^[[:space:]]*"%s"[[:space:]]*:' "${id//./\\.}"
+}
+
+# Ensure the last non-comment content line before the closing brace ends with a comma.
+ensure_trailing_comma_before() {
+  local -n _lines=$1
+  local closing=$2
+  local i line
+  for (( i = closing - 1; i >= 0; i-- )); do
+    line=${_lines[$i]}
+    [[ $line =~ ^[[:space:]]*$ || $line =~ ^[[:space:]]*// ]] && continue
+    if [[ ! $line =~ \{[[:space:]]*$ && ! $line =~ ,[[:space:]]*$ ]]; then
+      _lines[$i]="$line,"
+    fi
+    break
+  done
+}
+
+find_closing_brace() {
+  local -n _lines=$1
+  local i
+  for (( i = ${#_lines[@]} - 1; i >= 0; i-- )); do
+    if [[ ${_lines[$i]} =~ ^[[:space:]]*\}[[:space:]]*$ ]]; then
+      printf '%s\n' "$i"
+      return 0
+    fi
+  done
+  return 1
+}
+
+entry_present() {
+  local key=$1
+  [[ -f $menu_file ]] || return 1
+  grep -Eq "$(key_pattern "$key")" "$menu_file"
+}
+
+strip_lines_matching() {
+  local pattern=$1
+  local drop_marker=${2:-0}
+  [[ -f $menu_file ]] || return 0
+  mapfile -t lines <"$menu_file"
+  local tmp line
+  tmp=$(mktemp "${menu_file}.tmp.XXXXXX")
+  for line in "${lines[@]}"; do
+    if (( drop_marker )) && [[ $line == "$marker" ]]; then
+      continue
+    fi
+    [[ $line =~ $pattern ]] && continue
+    printf '%s\n' "$line"
+  done >"$tmp"
+  mv "$tmp" "$menu_file"
+}
+
+strip_legacy_nested() {
+  strip_lines_matching "$LEGACY_NESTED_PATTERN" 0
+}
+
+# Replace an existing JSONC entry line for key, or no-op if missing.
+replace_entry_line() {
+  local key=$1
+  local new_line=$2
+  mapfile -t lines <"$menu_file"
+  local tmp i updated=0
+  tmp=$(mktemp "${menu_file}.tmp.XXXXXX")
+  local pattern
+  pattern=$(key_pattern "$key")
+  for (( i = 0; i < ${#lines[@]}; i++ )); do
+    if [[ ${lines[$i]} =~ $pattern ]]; then
+      local out=$new_line
+      if [[ ${lines[$i]} =~ ,[[:space:]]*$ && ! $out =~ ,[[:space:]]*$ ]]; then
+        out="$out,"
+      fi
+      printf '%s\n' "$out"
+      updated=1
+    else
+      printf '%s\n' "${lines[$i]}"
+    fi
+  done >"$tmp"
+  mv "$tmp" "$menu_file"
+  return $(( updated == 0 ))
+}
+
+insert_before_closing() {
+  local new_block=$1
+  mapfile -t lines <"$menu_file"
+  local closing
+  closing=$(find_closing_brace lines) || {
+    echo "Could not find the menu object's closing brace" >&2
+    exit 1
+  }
+  ensure_trailing_comma_before lines "$closing"
+
+  local tmp
+  tmp=$(mktemp "${menu_file}.tmp.XXXXXX")
+  local i
+  for (( i = 0; i < ${#lines[@]}; i++ )); do
+    if (( i == closing )); then
+      printf '%s\n' "$new_block"
+    fi
+    printf '%s\n' "${lines[$i]}"
+  done >"$tmp"
+  mv "$tmp" "$menu_file"
+}
+
+upsert_entry() {
+  local key=$1
+  local line=$2
+  if entry_present "$key"; then
+    replace_entry_line "$key" "$line" && changed=1 || true
+  else
+    insert_before_closing "$line"
+    added=1
+  fi
+}
+
+install_entry() {
+  mkdir -p "$(dirname -- "$menu_file")"
+  if [[ ! -f $menu_file ]]; then
+    printf '{\n%s\n%s,\n%s,\n%s\n}\n' "$marker" "$entry_main" "$entry_revert" "$entry_tui" >"$menu_file"
+    refresh_menu
+    echo "Installed menu entries → $menu_file"
+    return
+  fi
+
+  strip_legacy_nested
+
+  added=0
+  changed=0
+  if entry_present "$KEY_MAIN"; then
+    replace_entry_line "$KEY_MAIN" "$entry_main" && changed=1 || true
+  else
+    insert_before_closing "$(printf '%s\n%s' "$marker" "$entry_main")"
+    added=1
+  fi
+  upsert_entry "$KEY_REVERT" "$entry_revert"
+  upsert_entry "$KEY_TUI" "$entry_tui"
+
+  if (( added || changed )); then
+    refresh_menu
+    echo "Installed menu entries → $menu_file"
+  else
+    echo "Menu entries already present."
+  fi
+}
+
+remove_entry() {
+  [[ -f $menu_file ]] || return
+  strip_lines_matching "$OWNED_LINE_PATTERN" 1
+  refresh_menu
+  echo "Removed menu entries from $menu_file"
+}
+
+case "$action" in
+  install) install_entry ;;
+  remove) remove_entry ;;
+  *) usage ;;
+esac

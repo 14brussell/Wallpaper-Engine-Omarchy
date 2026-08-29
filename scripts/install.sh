@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# One-shot setup after `omarchy plugin add` / local copy install.
+# Omarchy never runs plugin post-install hooks — call this explicitly.
+#
+# Qt QML compares the plugin URL to the real filesystem path. A symlink from
+# ~/.config/omarchy/plugins/wallpaper-engine-omarchy → a mixed-case repo
+# (e.g. .../Wallpaper-Engine-Omarchy) fails with "File name case mismatch"
+# and Service.qml never loads. Always install as a real directory
+# whose name matches the lowercase plugin id.
+
+set -euo pipefail
+
+SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+PLUGIN_ID="wallpaper-engine-omarchy"
+if [[ -f $SOURCE/manifest.json ]]; then
+  _id=$(sed -n 's/^[[:space:]]*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SOURCE/manifest.json" | head -n1)
+  [[ -n ${_id:-} ]] && PLUGIN_ID=$_id
+fi
+DEST="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/${PLUGIN_ID}"
+
+copy_tree() {
+  local src=$1 dest=$2
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete --exclude '.git/' --exclude '.git' \
+      --exclude '__pycache__/' --exclude '*.pyc' "$src/" "$dest/"
+  else
+    find "$dest" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+    cp -a "$src"/. "$dest"/
+    rm -rf "$dest/.git"
+    find "$dest" -type d -name __pycache__ -prune -exec rm -rf {} +
+    find "$dest" -type f -name '*.pyc' -delete
+  fi
+}
+
+set_tree_modes() {
+  local root=$1
+  chmod +x \
+    "$root/bin/we" \
+    "$root/lib/compose_desktop.py" \
+    "$root/scripts/we-menu" \
+    "$root/scripts/we-menu-entry" \
+    "$root/scripts/we-stage-transition" \
+    "$root/scripts/install-hooks" \
+    "$root/scripts/install.sh" \
+    "$root/hooks/post-boot.sh" \
+    "$root/hooks/theme-set.sh"
+}
+
+validate_stage() {
+  local root=$1 f qml_lint=""
+  jq -e --arg id "$PLUGIN_ID" '.id == $id and (.entryPoints | type == "object")' \
+    "$root/manifest.json" >/dev/null
+  for f in "$root"/bin/we "$root"/lib/common.sh "$root"/scripts/* "$root"/hooks/*.sh; do
+    [[ -f $f ]] || continue
+    case "$f" in
+      *.sh|*/we|*/we-menu|*/we-menu-entry|*/we-stage-transition|*/install-hooks)
+        bash -n "$f"
+        ;;
+    esac
+  done
+  python3 -m py_compile "$root/lib/compose_desktop.py"
+  if command -v qmllint >/dev/null 2>&1; then
+    qml_lint=$(command -v qmllint)
+  elif [[ -x /usr/lib/qt6/bin/qmllint ]]; then
+    qml_lint=/usr/lib/qt6/bin/qmllint
+  fi
+  if [[ -n $qml_lint ]]; then
+    "$qml_lint" "$root"/*.qml >/dev/null 2>&1
+  fi
+  if command -v omarchy-plugin-validate >/dev/null 2>&1; then
+    omarchy-plugin-validate "$root" >/dev/null
+  fi
+}
+
+# Copy into the lowercase plugin-id path as a real directory (never a symlink
+# to a differently-cased source tree). If we are already running from that
+# directory, skip the copy.
+sync_plugin_tree() {
+  local src=$1 dest=$2
+  local parent stage generation replaced=0 committed=0 require_health=0 shell_config
+  parent=$(dirname -- "$dest")
+  mkdir -p "$parent"
+
+  if [[ ! -L $dest && -d $dest ]]; then
+    local dest_phys src_phys
+    dest_phys=$(cd "$dest" && pwd -P)
+    src_phys=$(cd "$src" && pwd -P)
+    if [[ $dest_phys == "$dest" && $src_phys == "$dest_phys" ]]; then
+      return 0
+    fi
+  fi
+
+  # Hidden siblings are ignored by Omarchy's recursive plugin watcher. Build
+  # and validate the complete replacement there, then expose one atomic move.
+  stage=$(mktemp -d "$parent/.${PLUGIN_ID}.stage.XXXXXX")
+  copy_tree "$src" "$stage"
+  generation="$(date +%s%N)-$$-$RANDOM"
+  sed -i "s/__WE_BUILD_GENERATION__/$generation/g" "$stage/Service.qml"
+  set_tree_modes "$stage"
+  validate_stage "$stage"
+
+  # Decide from durable shell configuration, not old IPC responsiveness. A
+  # wedged old service is precisely when rollback protection matters most.
+  shell_config="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
+  if [[ -f $shell_config ]] \
+    && jq -e --arg id "$PLUGIN_ID" \
+      '((.disabledPlugins // []) | index($id) == null)
+       and ([.. | objects | select(.id? == $id)] | length > 0)' \
+      "$shell_config" >/dev/null 2>&1; then
+    require_health=1
+  fi
+
+  rollback_swap() {
+    local restored=0
+    (( committed )) || return 0
+    # Clear the guard before moving anything: ERR after INT/TERM must not
+    # exchange the trees a second time.
+    committed=0
+    if (( replaced )); then
+      if mv --exchange --no-copy --no-target-directory "$stage" "$dest"; then
+        restored=1
+      fi
+    elif [[ -e $dest || -L $dest ]]; then
+      if mv --no-copy --no-target-directory "$dest" "$stage"; then
+        restored=1
+      fi
+    fi
+    (( restored )) && rm -rf -- "$stage"
+  }
+  rollback_error() {
+    local rc=$?
+    trap - ERR INT TERM
+    rollback_swap
+    return "$rc"
+  }
+  rollback_signal() {
+    local rc=$1
+    trap - ERR INT TERM
+    rollback_swap
+    exit "$rc"
+  }
+  trap rollback_error ERR
+  trap 'rollback_signal 130' INT
+  trap 'rollback_signal 143' TERM
+
+  if [[ -e $dest || -L $dest ]]; then
+    mv --exchange --no-copy --no-target-directory "$stage" "$dest"
+    replaced=1
+  else
+    mv --no-copy --no-target-directory "$stage" "$dest"
+  fi
+  committed=1
+
+  # The visible move causes one debounced automatic reload. Never overlap it
+  # with an explicit rescan. Omarchy's in-process plugin reload can retain old
+  # IPC handlers and invalid QML contexts, so an enabled plugin gets one clean,
+  # supported shell restart before generation-specific health verification.
+  if (( require_health )); then
+    if ! command -v omarchy-restart-shell >/dev/null 2>&1 \
+      || ! omarchy-restart-shell; then
+      echo "Could not safely restart Omarchy shell; rolling back plugin update." >&2
+      rollback_swap
+      trap - ERR INT TERM
+      command -v omarchy-restart-shell >/dev/null 2>&1 && omarchy-restart-shell || true
+      return 1
+    fi
+    local healthy=0 actual deadline=$((SECONDS + 10))
+    while (( SECONDS < deadline )); do
+      actual=$(timeout -k 0.2 0.8 \
+        omarchy-shell "wallpaper-engine-generation-${generation}" ping 2>/dev/null || true)
+      if [[ $actual == "$generation" ]]; then
+        healthy=1
+        break
+      fi
+      sleep 0.1
+    done
+    if (( ! healthy )); then
+      echo "Updated plugin failed its health check; rolling back." >&2
+      rollback_swap
+      trap - ERR INT TERM
+      omarchy-restart-shell || true
+      return 1
+    fi
+  fi
+
+  committed=0
+  trap - ERR INT TERM
+  if (( replaced )); then
+    rm -rf "$stage"
+  fi
+}
+
+# Refuse to swap code while an apply/revert transaction owns the same plugin.
+mkdir -p "$(dirname -- "$DEST")" "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/wallpaper-engine"
+exec 8>"$(dirname -- "$DEST")/.${PLUGIN_ID}.install.lock"
+flock -w 5 8 || { echo "Another plugin install is already running." >&2; exit 1; }
+exec 7>"${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/wallpaper-engine/transition.lock"
+flock -w 2 7 || { echo "Wallpaper transition is active; retry the install when it finishes." >&2; exit 1; }
+
+sync_plugin_tree "$SOURCE" "$DEST"
+ROOT=$DEST
+
+set_tree_modes "$ROOT"
+
+"$ROOT/scripts/we-menu-entry" install
+"$ROOT/scripts/install-hooks" install
+
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$ROOT/bin/we" "$HOME/.local/bin/omarchy-we"
+ln -sfn "$ROOT/bin/we" "$HOME/.local/bin/we-omarchy"
+
+echo
+echo "Wallpaper Engine Omarchy setup complete."
+echo "  Installed: $ROOT  (real directory; plugin id $PLUGIN_ID)"
+echo "  GUI:    Style → Wallpaper Engine  (Quickshell panel; or: omarchy-we panel)"
+echo "  Revert: Style → Revert to theme background"
+echo "  TUI:    Style → Wallpaper Engine (advanced TUI)  — optional gum fallback"
+echo "  CLI:    omarchy-we apply | revert | doctor"
+echo "  Config: ~/.config/omarchy/wallpaper-engine/config.json"
+echo
+echo "After editing the source tree, re-run this script to copy into the plugin dir."
+echo "Enable the plugin / bar widget (if not already):"
+echo "  omarchy plugin enable wallpaper-engine-omarchy"
+echo
+"$ROOT/bin/we" doctor || true

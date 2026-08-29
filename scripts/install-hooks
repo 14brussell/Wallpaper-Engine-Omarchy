@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Install Omarchy hooks so Wallpaper Engine restores on boot and tracks theme bgs.
+# Hook bodies live in hooks/*.sh; this script copies them into ~/.config/omarchy/hooks
+# with ROOT baked to the plugin tree (live hooks cannot locate the plugin via $0).
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+action=${1:-install}
+HOOKS_ROOT="${WE_HOOKS_ROOT:-$HOME/.config/omarchy/hooks}"
+MARKER="# wallpaper-engine-omarchy"
+
+POST_BOOT="$HOOKS_ROOT/post-boot.d/50-wallpaper-engine"
+THEME_SET="$HOOKS_ROOT/theme-set.d/50-wallpaper-engine"
+
+usage() {
+  echo "Usage: install-hooks [install|remove]" >&2
+  exit 1
+}
+
+# Copy a reference hook, inject the marker, and pin ROOT to this plugin tree.
+write_hook() {
+  local src=$1 dest=$2
+  [[ -f $src ]] || {
+    echo "Missing hook source: $src" >&2
+    exit 1
+  }
+  mkdir -p "$(dirname -- "$dest")"
+  local tmp line first=1
+  tmp=$(mktemp "${dest}.tmp.XXXXXX")
+  {
+    echo "#!/usr/bin/env bash"
+    echo "$MARKER"
+    while IFS= read -r line || [[ -n $line ]]; do
+      if (( first )) && [[ $line == "#!"* ]]; then
+        first=0
+        continue
+      fi
+      first=0
+      [[ $line == "$MARKER" ]] && continue
+      if [[ $line == ROOT=* ]]; then
+        printf 'ROOT="%s"\n' "$ROOT"
+      else
+        printf '%s\n' "$line"
+      fi
+    done <"$src"
+  } >"$tmp"
+  chmod +x "$tmp"
+  mv "$tmp" "$dest"
+}
+
+install_hooks() {
+  write_hook "$ROOT/hooks/post-boot.sh" "$POST_BOOT"
+  write_hook "$ROOT/hooks/theme-set.sh" "$THEME_SET"
+
+  echo "Installed hooks:"
+  echo "  $POST_BOOT"
+  echo "  $THEME_SET"
+}
+
+remove_hooks() {
+  rm -f "$POST_BOOT" "$THEME_SET"
+  echo "Removed wallpaper-engine hooks."
+}
+
+case "$action" in
+  install) install_hooks ;;
+  remove) remove_hooks ;;
+  *) usage ;;
+esac

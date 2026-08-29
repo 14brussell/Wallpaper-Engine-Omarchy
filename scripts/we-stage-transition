@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Stage per-output FROM/TO stills and optionally write wipe-request.json.
+# Used by apply/revert (lib/common.sh) and as a debug CLI.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../lib/common.sh
+source "$ROOT/lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: we-stage-transition [layout|from|to|stage|play] [args...]
+
+  layout                 Print hyprctl bounding-box layout JSON
+  from                   Full-layout FROM canvas (grim, then per-output if needed)
+  to [--theme] [mon...]  TO canvas (native stills composed)
+  stage [--theme] [mon...]
+                         Per-output FROM/TO JSON (FROM cover first, then TO)
+  play [--theme] [mon...]
+                         FROM cover + TO update + write wipe-request.json
+EOF
+}
+
+cmd=${1:-stage}
+[[ $# -gt 0 ]] && shift || true
+
+case "$cmd" in
+  -h|--help|help) usage ;;
+  layout) we_layout_json ;;
+  from) we_capture_from_canvas ;;
+  to) we_build_to_canvas "$@" ;;
+  play)
+    we_ensure_dirs
+    if ! we_overlay_cover_then_to "$@"; then
+      echo "Failed to cover FROM / stage TO stills." >&2
+      exit 1
+    fi
+    ;;
+  stage|*)
+    we_build_wipe_outputs "$@"
+    ;;
+esac

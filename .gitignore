@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.log
+
+# Local editor and environment state
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
+
+# Temporary and packaged output
+*.tmp
+*.swp
+dist/
+build/

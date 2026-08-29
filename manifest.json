@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "wallpaper-engine-omarchy",
+  "name": "Wallpaper Engine",
+  "version": "1.5.0",
+  "author": "brussell",
+  "license": "MIT",
+  "description": "Steam Wallpaper Engine backgrounds on Omarchy/Hyprland via linux-wallpaperengine, with a Quickshell GUI (one tab per display), Workshop browse, and revert to the Omarchy theme background.",
+  "kinds": ["bar-widget", "panel", "service"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "barWidget": "BarWidget.qml",
+    "panel": "Panel.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Wallpaper Engine",
+    "description": "Open the Wallpaper Engine panel (per-display tabs, Workshop browse, revert to theme).",
+    "category": "Style",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

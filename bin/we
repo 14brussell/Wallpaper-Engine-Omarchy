@@ -1,0 +1,659 @@
+#!/usr/bin/env bash
+# omarchy-we — Wallpaper Engine controller for Omarchy / Hyprland.
+#
+# Wraps Almamu linux-wallpaperengine with per-display config and theme-bg restore.
+# There is no global playback-speed CLI flag — use properties / --set-property.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../lib/common.sh
+source "$ROOT/lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: we <command> [args]
+
+Commands:
+  menu                         Interactive gum TUI (advanced / fallback)
+  panel / gui                  Summon the Quickshell GUI panel
+  status [--json]              Show active state and per-display settings
+  display-config <mon> [--json]
+                               Effective settings for one display (defaults + overrides)
+  list [--json]                List Workshop wallpapers (scan project.json)
+  monitors [--json]            List displays (name, or JSON with width/height)
+  apply [monitor...]           Start/replace only the named display processes;
+                               without names, independently apply all configured displays
+  stop [monitor...]            Stop named display processes, or all when omitted;
+                               leave the Omarchy theme background in place
+  revert                       Stop WE and restore Omarchy theme background
+  set-display <monitor> [opts] Configure one display (--json → effective settings)
+  set-defaults [opts]          Configure global defaults
+  set-property <mon> <k> <v>   Set a wallpaper --set-property for a display
+  browse                       Pick a wallpaper and apply to display(s) (gum)
+  properties <id|path> [--json]
+  list-properties <id|path> [--json]
+                               Wallpaper properties + capability flags (audio/mouse)
+  config                       Print config path / open with --edit
+  install-hooks                Install post-boot + theme-set hooks
+  uninstall-hooks              Remove hooks
+  install-menu                 Add Style → Wallpaper Engine menu entries
+  uninstall-menu               Remove menu entries
+  doctor                       Check dependencies and paths
+
+set-display / set-defaults options:
+  --wallpaper <id|path>   Workshop id or wallpaper folder
+  --scaling <mode>        stretch | fit | fill | default
+  --fps <n>               Frame limit for this display process
+  --silent / --audio      Mute or enable wallpaper audio
+  --volume <0-100>        Volume when audio enabled
+  --noautomute / --automute
+                          Disable/enable automute when other apps play sound
+  --layer <name>          Wayland layer (default/recommended: bottom)
+  --clamp <mode>          clamp | border | repeat
+  --no-fullscreen-pause / --fullscreen-pause
+                          Keep playing (or pause) when an app is fullscreen
+  --fullscreen-pause-only-active / --fullscreen-pause-any
+                          Pause only for the active fullscreen app, or any fullscreen app
+  --fullscreen-pause-ignore-appids <csv>
+                          Replace the per-display fullscreen app-id ignore list
+  --no-audio-processing / --audio-processing
+                          Disable/enable audio-reactive processing
+  --disable-particles / --particles
+                          Disable/enable scene particles
+  --disable-mouse / --mouse
+                          Disable/enable mouse interaction
+  --disable-parallax / --parallax
+                          Disable/enable parallax
+  --property k=v          Wallpaper property override (repeatable)
+  --clear                 Remove this display from config (set-display only)
+  --json                  Print effective display JSON after update (set-display)
+
+GUI call sequence (one tab = one display):
+  we set-display <mon> --wallpaper <id> --scaling fill --fps 30 …
+  we apply [mon]                   # blocks until that display renders a frame
+  we display-config <mon> --json   # bind tab fields
+  we status --json                 # .monitorNames / .monitorTitles from hyprctl
+                                   # plus .effectiveDisplays
+
+Examples:
+  we browse
+  we set-display DP-2 --wallpaper 823274093 --scaling fill --fps 30
+  we set-property DP-2 rate 1.0
+  we apply
+  we revert
+EOF
+}
+
+cmd_set_defaults() {
+  we_load_config
+  local wallpaper="" scaling="" fps="" silent="" volume="" layer="" clamp=""
+  local no_fullscreen_pause="" pause_only_active="" pause_ignore_appids="" pause_ignore_set=0
+  local noautomute="" no_audio_processing="" disable_particles=""
+  local disable_mouse="" disable_parallax=""
+  local -a props=()
+  while (( $# > 0 )); do
+    case "$1" in
+      --wallpaper) wallpaper=$2; shift 2 ;;
+      --scaling) scaling=$2; shift 2 ;;
+      --fps) fps=$2; shift 2 ;;
+      --silent) silent=true; shift ;;
+      --audio) silent=false; shift ;;
+      --volume) volume=$2; shift 2 ;;
+      --noautomute) noautomute=true; shift ;;
+      --automute) noautomute=false; shift ;;
+      --layer)
+        layer=$2
+        [[ $layer == background ]] && {
+          echo "Note: layer=background fights Omarchy; using bottom." >&2
+          layer=bottom
+        }
+        shift 2
+        ;;
+      --clamp) clamp=$2; shift 2 ;;
+      --no-fullscreen-pause) no_fullscreen_pause=true; shift ;;
+      --fullscreen-pause) no_fullscreen_pause=false; shift ;;
+      --fullscreen-pause-only-active) pause_only_active=true; shift ;;
+      --fullscreen-pause-any) pause_only_active=false; shift ;;
+      --fullscreen-pause-ignore-appids) pause_ignore_appids=$2; pause_ignore_set=1; shift 2 ;;
+      --no-audio-processing) no_audio_processing=true; shift ;;
+      --audio-processing) no_audio_processing=false; shift ;;
+      --disable-particles) disable_particles=true; shift ;;
+      --particles) disable_particles=false; shift ;;
+      --disable-mouse) disable_mouse=true; shift ;;
+      --mouse) disable_mouse=false; shift ;;
+      --disable-parallax) disable_parallax=true; shift ;;
+      --parallax) disable_parallax=false; shift ;;
+      --property) props+=("$2"); shift 2 ;;
+      --speed)
+        echo "No global speed flag. Use: we set-property <monitor> <name> <value>" >&2
+        echo "  (inspect names with: we properties <wallpaper-id> --json)" >&2
+        return 1
+        ;;
+      *) echo "Unknown option: $1" >&2; return 1 ;;
+    esac
+  done
+  [[ -n $scaling ]] && we_jq_write --arg v "$scaling" '.defaults.scaling = $v'
+  [[ -n $fps ]] && we_jq_write --argjson v "$fps" '.defaults.fps = $v'
+  [[ -n $silent ]] && we_jq_write --argjson v "$silent" '.defaults.silent = $v'
+  [[ -n $volume ]] && we_jq_write --argjson v "$volume" '.defaults.volume = $v'
+  [[ -n $layer ]] && we_jq_write --arg v "$layer" '.defaults.layer = $v'
+  [[ -n $clamp ]] && we_jq_write --arg v "$clamp" '.defaults.clamp = $v'
+  [[ -n $no_fullscreen_pause ]] && we_jq_write --argjson v "$no_fullscreen_pause" \
+    '.defaults.no_fullscreen_pause = $v'
+  [[ -n $pause_only_active ]] && we_jq_write --argjson v "$pause_only_active" \
+    '.defaults.fullscreen_pause_only_active = $v'
+  (( pause_ignore_set )) && we_jq_write --arg v "$pause_ignore_appids" \
+    '.defaults.fullscreen_pause_ignore_appids = ($v | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)))'
+  [[ -n $noautomute ]] && we_jq_write --argjson v "$noautomute" '.defaults.noautomute = $v'
+  [[ -n $no_audio_processing ]] && we_jq_write --argjson v "$no_audio_processing" \
+    '.defaults.no_audio_processing = $v'
+  [[ -n $disable_particles ]] && we_jq_write --argjson v "$disable_particles" \
+    '.defaults.disable_particles = $v'
+  [[ -n $disable_mouse ]] && we_jq_write --argjson v "$disable_mouse" '.defaults.disable_mouse = $v'
+  [[ -n $disable_parallax ]] && we_jq_write --argjson v "$disable_parallax" \
+    '.defaults.disable_parallax = $v'
+  [[ -n $wallpaper ]] && we_jq_write --arg v "$wallpaper" '.defaults.wallpaper = $v'
+  local p k v
+  for p in "${props[@]}"; do
+    k=${p%%=*}
+    v=${p#*=}
+    [[ -n $k ]] && we_jq_write --arg k "$k" --arg v "$v" '.defaults.properties[$k] = $v'
+  done
+  echo "Defaults updated."
+}
+
+cmd_set_display() {
+  we_load_config
+  local monitor=${1:-}
+  [[ -n $monitor ]] || { echo "Usage: we set-display <monitor> [options]" >&2; return 1; }
+  shift
+
+  local wallpaper="" scaling="" fps="" silent="" volume="" layer="" clamp="" clear=0 json=0
+  local no_fullscreen_pause="" pause_only_active="" pause_ignore_appids="" pause_ignore_set=0
+  local noautomute="" no_audio_processing="" disable_particles=""
+  local disable_mouse="" disable_parallax=""
+  local -a props=()
+  while (( $# > 0 )); do
+    case "$1" in
+      --wallpaper) wallpaper=$2; shift 2 ;;
+      --scaling) scaling=$2; shift 2 ;;
+      --fps) fps=$2; shift 2 ;;
+      --silent) silent=true; shift ;;
+      --audio) silent=false; shift ;;
+      --volume) volume=$2; shift 2 ;;
+      --noautomute) noautomute=true; shift ;;
+      --automute) noautomute=false; shift ;;
+      --layer)
+        layer=$2
+        [[ $layer == background ]] && {
+          echo "Note: layer=background fights Omarchy; using bottom." >&2
+          layer=bottom
+        }
+        shift 2
+        ;;
+      --clamp) clamp=$2; shift 2 ;;
+      --no-fullscreen-pause) no_fullscreen_pause=true; shift ;;
+      --fullscreen-pause) no_fullscreen_pause=false; shift ;;
+      --fullscreen-pause-only-active) pause_only_active=true; shift ;;
+      --fullscreen-pause-any) pause_only_active=false; shift ;;
+      --fullscreen-pause-ignore-appids) pause_ignore_appids=$2; pause_ignore_set=1; shift 2 ;;
+      --no-audio-processing) no_audio_processing=true; shift ;;
+      --audio-processing) no_audio_processing=false; shift ;;
+      --disable-particles) disable_particles=true; shift ;;
+      --particles) disable_particles=false; shift ;;
+      --disable-mouse) disable_mouse=true; shift ;;
+      --mouse) disable_mouse=false; shift ;;
+      --disable-parallax) disable_parallax=true; shift ;;
+      --parallax) disable_parallax=false; shift ;;
+      --property) props+=("$2"); shift 2 ;;
+      --speed)
+        echo "No global speed flag. Use: we set-property $monitor <name> <value>" >&2
+        echo "  (inspect names with: we properties <wallpaper-id> --json)" >&2
+        return 1
+        ;;
+      --clear) clear=1; shift ;;
+      --json) json=1; shift ;;
+      *) echo "Unknown option: $1" >&2; return 1 ;;
+    esac
+  done
+
+  if (( clear )); then
+    we_jq_write --arg m "$monitor" 'del(.displays[$m])'
+    if (( json )); then
+      we_effective_display_json "$monitor"
+    else
+      echo "Cleared display $monitor"
+    fi
+    return 0
+  fi
+
+  local resolved=""
+  if [[ -n $wallpaper ]]; then
+    resolved=$(we_resolve_wallpaper "$wallpaper") || return 1
+    if ! we_wallpaper_supported_dir "$resolved"; then
+      echo "Unsupported Wallpaper Engine item $wallpaper: project type is missing or unsupported." >&2
+      echo "Choose a Scene, Video, or Web wallpaper shown in the refreshed list." >&2
+      return 1
+    fi
+  fi
+
+  we_jq_write --arg m "$monitor" '.displays[$m] = (.displays[$m] // {})'
+
+  if [[ -n $wallpaper ]]; then
+    local stored=$wallpaper
+    [[ $wallpaper =~ ^[0-9]+$ ]] || stored=$resolved
+    we_jq_write --arg m "$monitor" --arg v "$stored" '.displays[$m].wallpaper = $v'
+  fi
+  [[ -n $scaling ]] && we_jq_write --arg m "$monitor" --arg v "$scaling" '.displays[$m].scaling = $v'
+  [[ -n $fps ]] && we_jq_write --arg m "$monitor" --argjson v "$fps" '.displays[$m].fps = $v'
+  [[ -n $silent ]] && we_jq_write --arg m "$monitor" --argjson v "$silent" '.displays[$m].silent = $v'
+  [[ -n $volume ]] && we_jq_write --arg m "$monitor" --argjson v "$volume" '.displays[$m].volume = $v'
+  [[ -n $layer ]] && we_jq_write --arg m "$monitor" --arg v "$layer" '.displays[$m].layer = $v'
+  [[ -n $clamp ]] && we_jq_write --arg m "$monitor" --arg v "$clamp" '.displays[$m].clamp = $v'
+  [[ -n $no_fullscreen_pause ]] && we_jq_write --arg m "$monitor" --argjson v "$no_fullscreen_pause" \
+    '.displays[$m].no_fullscreen_pause = $v'
+  [[ -n $pause_only_active ]] && we_jq_write --arg m "$monitor" --argjson v "$pause_only_active" \
+    '.displays[$m].fullscreen_pause_only_active = $v'
+  (( pause_ignore_set )) && we_jq_write --arg m "$monitor" --arg v "$pause_ignore_appids" \
+    '.displays[$m].fullscreen_pause_ignore_appids = ($v | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)))'
+  [[ -n $noautomute ]] && we_jq_write --arg m "$monitor" --argjson v "$noautomute" \
+    '.displays[$m].noautomute = $v'
+  [[ -n $no_audio_processing ]] && we_jq_write --arg m "$monitor" --argjson v "$no_audio_processing" \
+    '.displays[$m].no_audio_processing = $v'
+  [[ -n $disable_particles ]] && we_jq_write --arg m "$monitor" --argjson v "$disable_particles" \
+    '.displays[$m].disable_particles = $v'
+  [[ -n $disable_mouse ]] && we_jq_write --arg m "$monitor" --argjson v "$disable_mouse" \
+    '.displays[$m].disable_mouse = $v'
+  [[ -n $disable_parallax ]] && we_jq_write --arg m "$monitor" --argjson v "$disable_parallax" \
+    '.displays[$m].disable_parallax = $v'
+
+  local p k v
+  for p in "${props[@]}"; do
+    k=${p%%=*}
+    v=${p#*=}
+    [[ -n $k ]] && we_jq_write --arg m "$monitor" --arg k "$k" --arg v "$v" \
+      '.displays[$m].properties = ((.displays[$m].properties // {}) + {($k): $v})'
+  done
+
+  if (( json )); then
+    we_effective_display_json "$monitor"
+  else
+    echo "Updated display $monitor"
+    we_jq --arg m "$monitor" '.displays[$m]'
+  fi
+}
+
+cmd_list_properties() {
+  local ref="" json=0
+  while (( $# > 0 )); do
+    case "$1" in
+      --json) json=1; shift ;;
+      --text) json=0; shift ;;
+      -*)
+        echo "Unknown option: $1" >&2
+        echo "Usage: we list-properties <id|path> [--json]" >&2
+        return 1
+        ;;
+      *)
+        if [[ -z $ref ]]; then
+          ref=$1
+          shift
+        else
+          echo "Unexpected argument: $1" >&2
+          return 1
+        fi
+        ;;
+    esac
+  done
+  [[ -n $ref ]] || {
+    echo "Usage: we list-properties <id|path> [--json]" >&2
+    return 1
+  }
+
+  if (( json )); then
+    we_wallpaper_capabilities_json "$ref"
+    return 0
+  fi
+
+  local caps
+  caps=$(we_wallpaper_capabilities_json "$ref")
+  printf 'id=%s type=%s hasAudio=%s (%s) mouse=%s parallax=%s\n' \
+    "$(jq -r '.id' <<<"$caps")" \
+    "$(jq -r '.type // "?"' <<<"$caps")" \
+    "$(jq -r '.hasAudio' <<<"$caps")" \
+    "$(jq -r '.audioReason // "-"' <<<"$caps")" \
+    "$(jq -r '.supportsMouse' <<<"$caps")" \
+    "$(jq -r '.supportsParallax' <<<"$caps")"
+  jq -r '.properties[] | "  \(.key) (\(.type)) = \(.value) — \(.label)"' <<<"$caps"
+}
+
+cmd_display_config() {
+  local monitor="" json=1
+  while (( $# > 0 )); do
+    case "$1" in
+      --json) json=1; shift ;;
+      --text) json=0; shift ;;
+      -*)
+        echo "Unknown option: $1" >&2
+        echo "Usage: we display-config <monitor> [--json|--text]" >&2
+        return 1
+        ;;
+      *)
+        if [[ -z $monitor ]]; then
+          monitor=$1
+          shift
+        else
+          echo "Unexpected argument: $1" >&2
+          return 1
+        fi
+        ;;
+    esac
+  done
+  [[ -n $monitor ]] || {
+    echo "Usage: we display-config <monitor> [--json|--text]" >&2
+    return 1
+  }
+  if (( json )); then
+    we_effective_display_json "$monitor"
+  else
+    local eff
+    eff=$(we_effective_display_json "$monitor")
+    printf '%s wallpaper=%s scaling=%s fps=%s clamp=%s silent=%s volume=%s layer=%s\n' \
+      "$(jq -r '.monitor' <<<"$eff")" \
+      "$(jq -r '.wallpaper // "none"' <<<"$eff")" \
+      "$(jq -r '.scaling' <<<"$eff")" \
+      "$(jq -r '.fps' <<<"$eff")" \
+      "$(jq -r '.clamp' <<<"$eff")" \
+      "$(jq -r '.silent' <<<"$eff")" \
+      "$(jq -r '.volume' <<<"$eff")" \
+      "$(jq -r '.layer' <<<"$eff")"
+    printf '  properties=%s\n' "$(jq -c '.properties' <<<"$eff")"
+  fi
+}
+
+# Live hyprctl name/title string arrays for QML. Never objects — Panel binds
+# these as JS string lists so tabs don't become "[object Object]".
+# Titles: "DP-2 · 2560×1440" from compositor geometry at call time.
+we_cli_hypr_monitor_labels() {
+  local raw='[]'
+  if command -v hyprctl >/dev/null 2>&1; then
+    raw=$(timeout -k 1 "${WE_HYPRCTL_TIMEOUT_S:-2}" hyprctl monitors -j 2>/dev/null || echo '[]')
+  fi
+  if ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw"; then
+    raw='[]'
+  fi
+  jq -c '
+    {
+      monitorNames: [.[] | .name | tostring],
+      monitorTitles: [.[] |
+        if (.width != null and .height != null and .width > 0 and .height > 0)
+        then "\(.name) · \(.width)×\(.height)"
+        else (.name | tostring)
+        end
+      ]
+    }
+  ' <<<"$raw" 2>/dev/null || echo '{"monitorNames":[],"monitorTitles":[]}'
+}
+
+cmd_status() {
+  if [[ ${1:-} == --json ]]; then
+    cmd_status_json
+  else
+    we_status_text
+  fi
+}
+
+# Always overlay hyprctl-derived monitorNames/monitorTitles so the GUI contract
+# holds even if lib/common.sh's we_status_json shape changes.
+cmd_status_json() {
+  we_load_config
+  local base labels
+  if declare -F we_status_json >/dev/null 2>&1; then
+    base=$(we_status_json)
+  else
+    base='{}'
+  fi
+  if ! jq -e . >/dev/null 2>&1 <<<"$base"; then
+    base='{}'
+  fi
+  labels=$(we_cli_hypr_monitor_labels)
+  jq -c --argjson labels "$labels" '. + $labels' <<<"$base"
+}
+
+# Blocking apply: start/replace only the requested display process. There is no
+# QML transition and sibling displays are not restarted.
+cmd_apply() {
+  we_load_config
+  local -a requested=()
+  local m
+  for m in "$@"; do
+    [[ -n $m ]] && requested+=("$m")
+  done
+
+  if ((${#requested[@]} > 0)); then
+    local -a live=()
+    if command -v hyprctl >/dev/null 2>&1; then
+      mapfile -t live < <(timeout -k 1 "${WE_HYPRCTL_TIMEOUT_S:-2}" hyprctl monitors -j 2>/dev/null | jq -r '.[].name' || true)
+    fi
+    if ((${#live[@]} == 0)) && declare -F we_list_monitors >/dev/null 2>&1; then
+      mapfile -t live < <(we_list_monitors 2>/dev/null || true)
+    fi
+    if ((${#live[@]} > 0)); then
+      for m in "${requested[@]}"; do
+        if ! we_name_in_list "$m" "${live[@]}"; then
+          echo "Unknown display: $m (not reported by hyprctl)" >&2
+          printf '  detected: %s\n' "${live[*]}" >&2
+          return 1
+        fi
+      done
+    fi
+  fi
+
+  if ((${#requested[@]} > 0)); then
+    we_start_engine "${requested[@]}"
+  else
+    we_start_engine
+  fi
+}
+
+cmd_stop() {
+  we_bg_queue_enter
+  we_load_config
+  local monitor
+  if (($#)); then
+    for monitor in "$@"; do
+      [[ -n $monitor ]] || continue
+      we_stop_engine_monitor "$monitor"
+    done
+  else
+    we_stop_engine
+  fi
+  we_sync_active_state
+}
+
+cmd_revert() {
+  we_revert_to_theme
+}
+
+cmd_panel() {
+  if command -v omarchy-shell >/dev/null 2>&1; then
+    omarchy-shell shell summon wallpaper-engine-omarchy ""
+  else
+    echo "omarchy-shell not found; open the gum TUI instead: we menu" >&2
+    exec "$ROOT/scripts/we-menu"
+  fi
+}
+
+cmd_set_property() {
+  local monitor=${1:-} key=${2:-} value=${3:-}
+  [[ -n $monitor && -n $key && -n $value ]] || {
+    echo "Usage: we set-property <monitor> <key> <value>" >&2
+    return 1
+  }
+  we_load_config
+  we_jq_write --arg m "$monitor" '.displays[$m] = (.displays[$m] // {})'
+  we_jq_write --arg m "$monitor" --arg k "$key" --arg v "$value" \
+    '.displays[$m].properties = ((.displays[$m].properties // {}) + {($k): $v})'
+  echo "Set $monitor property $key=$value (passed as --set-property on apply)"
+}
+
+cmd_browse() {
+  we_load_config
+  if ! command -v gum >/dev/null 2>&1; then
+    echo "gum is required for browse (provided by Omarchy)." >&2
+    return 1
+  fi
+
+  local lines=() id title path picked
+  while IFS=$'\t' read -r id title path preview; do
+    [[ -n $id ]] || continue
+    lines+=("$id"$'\t'"$title")
+  done < <(we_list_wallpapers | sort -t$'\t' -k2,2)
+
+  if ((${#lines[@]} == 0)); then
+    echo "No Workshop wallpapers found." >&2
+    echo "Install Wallpaper Engine on Steam and subscribe to wallpapers." >&2
+    we_workshop_dirs | sed 's/^/  searched: /' >&2
+    return 1
+  fi
+
+  picked=$(printf '%s\n' "${lines[@]}" | gum filter --header "Wallpaper Engine — pick a wallpaper" --height 20) || return 1
+  id=${picked%%$'\t'*}
+  title=${picked#*$'\t'}
+
+  local monitors=()
+  mapfile -t monitors < <(we_list_monitors)
+  if ((${#monitors[@]} == 0)); then
+    echo "No monitors detected." >&2
+    return 1
+  fi
+
+  local target_mode targets=() selected
+  target_mode=$(printf '%s\n' "All displays" "Pick displays..." | gum choose --header "Apply \"$title\" to") || return 1
+  if [[ $target_mode == "All displays" ]]; then
+    targets=("${monitors[@]}")
+  else
+    selected=$(printf '%s\n' "${monitors[@]}" | gum choose --no-limit --header "Displays") || return 1
+    mapfile -t targets <<<"$selected"
+  fi
+
+  local m
+  for m in "${targets[@]}"; do
+    [[ -n $m ]] || continue
+    "$ROOT/bin/we" set-display "$m" --wallpaper "$id" >/dev/null
+  done
+
+  if gum confirm "Adjust scaling / FPS before applying?" --default=false; then
+    local scaling fps
+    scaling=$(printf '%s\n' fill fit stretch default | gum choose --header "Scaling") || scaling=fill
+    fps=$(gum input --header "FPS for selected displays" --value "$(we_jq -r '.defaults.fps')") || fps=30
+    for m in "${targets[@]}"; do
+      [[ -n $m ]] || continue
+      "$ROOT/bin/we" set-display "$m" --scaling "$scaling" --fps "$fps" >/dev/null
+    done
+  fi
+
+  cmd_apply "${targets[@]}"
+  echo "Applied $id ($title) → ${targets[*]}"
+}
+
+cmd_doctor() {
+  echo "== Wallpaper Engine Omarchy doctor =="
+  echo "plugin: $WE_PLUGIN_ROOT"
+  echo "config: $WE_CONFIG_FILE"
+  echo "state:  $WE_STATE_DIR"
+  echo
+  if command -v "$WE_ENGINE_BIN" >/dev/null 2>&1; then
+    echo "engine: $(command -v "$WE_ENGINE_BIN") OK"
+  else
+    echo "engine: MISSING — install AUR package linux-wallpaperengine-git"
+  fi
+  for dep in jq gum hyprctl grim ffmpeg python3 omarchy-theme-bg-set omarchy-launch-tui; do
+    if command -v "$dep" >/dev/null 2>&1; then
+      echo "dep $dep: OK"
+    else
+      echo "dep $dep: missing"
+    fi
+  done
+  if python3 -c 'from PIL import Image' 2>/dev/null; then
+    echo "dep python3-pillow: OK"
+  elif command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1; then
+    echo "dep pillow: missing (ImageMagick fallback OK)"
+  else
+    echo "dep pillow: missing (need python-pillow or ImageMagick to compose canvases)"
+  fi
+  echo
+  echo "Workshop dirs:"
+  we_workshop_dirs | sed 's/^/  /' || echo "  (none)"
+  echo "wallpapers found: $(we_list_wallpapers | wc -l)"
+  echo
+  echo "Monitors:"
+  we_list_monitors | sed 's/^/  /' || echo "  (none)"
+  echo
+  echo "Omarchy background plugin: leave ENABLED (WE uses --layer bottom)."
+  echo
+  we_status_text
+}
+
+main() {
+  local cmd=${1:-menu}
+  [[ $# -gt 0 ]] && shift || true
+
+  case "$cmd" in
+    -h|--help|help) usage ;;
+    menu) exec "$ROOT/scripts/we-menu" ;;
+    panel|gui) cmd_panel ;;
+    status) cmd_status "$@" ;;
+    display-config) cmd_display_config "$@" ;;
+    list)
+      if [[ ${1:-} == --json ]]; then
+        we_list_wallpapers_json
+      else
+        we_list_wallpapers | while IFS=$'\t' read -r id title path preview; do
+          printf '%-12s  %s\n' "$id" "$title"
+        done
+      fi
+      ;;
+    monitors)
+      if [[ ${1:-} == --json ]]; then
+        we_monitors_json
+      else
+        we_monitors_json | jq -r '
+          .[] | if (.width != null and .height != null)
+            then "\(.name)  \(.width)x\(.height)"
+            else .name end
+        ' 2>/dev/null || we_list_monitors
+      fi
+      ;;
+    apply) cmd_apply "$@" ;;
+    stop) cmd_stop "$@" ;;
+    revert) cmd_revert ;;
+    set-display) cmd_set_display "$@" ;;
+    set-defaults) cmd_set_defaults "$@" ;;
+    set-property) cmd_set_property "$@" ;;
+    browse) cmd_browse ;;
+    properties|list-properties) cmd_list_properties "$@" ;;
+    config)
+      we_load_config
+      if [[ ${1:-} == --edit ]]; then
+        "${EDITOR:-nvim}" "$WE_CONFIG_FILE"
+      else
+        echo "$WE_CONFIG_FILE"
+        cat "$WE_CONFIG_FILE"
+      fi
+      ;;
+    install-hooks) exec "$ROOT/scripts/install-hooks" install ;;
+    uninstall-hooks) exec "$ROOT/scripts/install-hooks" remove ;;
+    install-menu) exec "$ROOT/scripts/we-menu-entry" install ;;
+    uninstall-menu) exec "$ROOT/scripts/we-menu-entry" remove ;;
+    doctor) cmd_doctor ;;
+    *)
+      echo "Unknown command: $cmd" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

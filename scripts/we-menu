@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# Interactive gum TUI for Wallpaper Engine (advanced / fallback).
+# Primary UX is the Quickshell GUI panel (Panel.qml / `we panel`).
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../lib/common.sh
+source "$ROOT/lib/common.sh"
+WE="$ROOT/bin/we"
+
+need_gum() {
+  command -v gum >/dev/null 2>&1 || {
+    echo "gum is required (ships with Omarchy)." >&2
+    exit 1
+  }
+}
+
+offer_apply_now() {
+  we_load_config
+  local active
+  active=$(we_jq -r '.active // false')
+  if [[ $active != true ]] && ! we_engine_running; then
+    return 0
+  fi
+  if gum confirm "Engine is active — Apply now?" --default=true; then
+    "$WE" apply || gum style --foreground 1 "Apply failed — run Doctor."
+  fi
+}
+
+pick_monitor() {
+  local monitors=()
+  mapfile -t monitors < <(we_list_monitors)
+  if ((${#monitors[@]} == 0)); then
+    gum style --foreground 1 "No monitors detected via hyprctl."
+    return 1
+  fi
+  if ((${#monitors[@]} == 1)); then
+    printf '%s\n' "${monitors[0]}"
+    return 0
+  fi
+  printf '%s\n' "${monitors[@]}" | gum choose --header "Select display"
+}
+
+pick_wallpaper_id() {
+  local lines=() id title path picked
+  while IFS=$'\t' read -r id title path preview; do
+    [[ -n $id ]] || continue
+    lines+=("$id"$'\t'"$title")
+  done < <(we_list_wallpapers | sort -t$'\t' -k2,2)
+
+  if ((${#lines[@]} == 0)); then
+    gum style --foreground 1 "No Workshop wallpapers found."
+    return 1
+  fi
+
+  picked=$(printf '%s\n' "${lines[@]}" | gum filter --header "Pick a wallpaper" --height 20) || return 1
+  printf '%s\n' "${picked%%$'\t'*}"
+}
+
+# Stay in the display submenu until Back.
+edit_display() {
+  local monitor
+  monitor=$(pick_monitor) || return 1
+  we_load_config
+  we_jq_write --arg m "$monitor" '.displays[$m] = (.displays[$m] // {})'
+
+  while true; do
+    we_load_config
+    local wp scaling fps
+    wp=$(we_display_wallpaper "$monitor")
+    [[ -n $wp ]] || wp="(none)"
+    scaling=$(we_display_setting "$monitor" scaling)
+    fps=$(we_display_setting "$monitor" fps)
+
+    local action
+    action=$(printf '%s\n' \
+      "Pick wallpaper" \
+      "Scaling ($scaling)" \
+      "FPS ($fps)" \
+      "Wallpaper properties (--set-property)" \
+      "Audio (silent/volume)" \
+      "Clamp" \
+      "Show settings" \
+      "Clear display config" \
+      "Back" | gum choose --header "Display: $monitor  ·  wallpaper $wp") || return 0
+
+    case "$action" in
+      "Pick wallpaper")
+        local id
+        id=$(pick_wallpaper_id) || continue
+        "$WE" set-display "$monitor" --wallpaper "$id"
+        offer_apply_now
+        ;;
+      Scaling*)
+        local scaling_new
+        scaling_new=$(printf '%s\n' fill fit stretch default | gum choose --header "Scaling for $monitor") || continue
+        "$WE" set-display "$monitor" --scaling "$scaling_new"
+        offer_apply_now
+        ;;
+      FPS*)
+        local fps_new
+        fps_new=$(gum input --header "FPS for $monitor" --value "$(we_display_setting "$monitor" fps)") || continue
+        "$WE" set-display "$monitor" --fps "$fps_new"
+        offer_apply_now
+        ;;
+      "Wallpaper properties (--set-property)")
+        local wp_id prop_out key value
+        wp_id=$(we_display_wallpaper "$monitor")
+        if [[ -z $wp_id ]]; then
+          gum style --foreground 1 "Pick a wallpaper first."
+          continue
+        fi
+        gum style --faint "No global speed flag — properties are wallpaper-specific (e.g. rate)."
+        if gum confirm "List properties for $wp_id via linux-wallpaperengine?" --default=true; then
+          prop_out=$("$WE" properties "$wp_id" 2>&1 || true)
+          printf '%s\n' "$prop_out" | gum pager
+        fi
+        key=$(gum input --header "Property name (e.g. rate)" --placeholder "rate") || continue
+        [[ -n $key ]] || continue
+        value=$(gum input --header "Value for $key" --placeholder "1.0") || continue
+        "$WE" set-property "$monitor" "$key" "$value"
+        offer_apply_now
+        ;;
+      "Audio (silent/volume)")
+        local mode
+        mode=$(printf '%s\n' Silent Audio | gum choose --header "Audio for $monitor") || continue
+        if [[ $mode == Silent ]]; then
+          "$WE" set-display "$monitor" --silent
+        else
+          local vol
+          vol=$(gum input --header "Volume 0-100" --value "$(we_display_setting "$monitor" volume)") || continue
+          "$WE" set-display "$monitor" --audio --volume "$vol"
+        fi
+        offer_apply_now
+        ;;
+      Clamp)
+        local clamp
+        clamp=$(printf '%s\n' border clamp repeat | gum choose --header "Clamp mode") || continue
+        "$WE" set-display "$monitor" --clamp "$clamp"
+        offer_apply_now
+        ;;
+      "Show settings")
+        we_jq --arg m "$monitor" '.displays[$m] // {}' | gum pager
+        ;;
+      "Clear display config")
+        "$WE" set-display "$monitor" --clear
+        offer_apply_now
+        ;;
+      Back)
+        return 0
+        ;;
+    esac
+  done
+}
+
+main_menu() {
+  need_gum
+  we_load_config
+
+  while true; do
+    local engine header
+    if we_engine_running; then engine=running; else engine=stopped; fi
+    header="Wallpaper Engine  ·  $engine  ·  theme $(we_current_theme_name)"
+
+    local choice
+    choice=$(printf '%s\n' \
+      "Browse & apply wallpaper" \
+      "Per-display settings" \
+      "Apply saved config" \
+      "Stop Wallpaper Engine" \
+      "Revert to Omarchy theme background" \
+      "Status" \
+      "Doctor (deps & paths)" \
+      "Edit config file" \
+      "Install menu entry" \
+      "Install autostart hooks" \
+      "Quit" | gum choose --header "$header") || exit 0
+
+    case "$choice" in
+      "Browse & apply wallpaper")
+        "$WE" browse || true
+        ;;
+      "Per-display settings")
+        edit_display || true
+        ;;
+      "Apply saved config")
+        if "$WE" apply; then
+          gum style --foreground 2 "Applied."
+          sleep 0.5
+        else
+          gum style --foreground 1 "Apply failed — run Doctor."
+          gum confirm "Continue?" --default=true >/dev/null || true
+        fi
+        ;;
+      "Stop Wallpaper Engine")
+        "$WE" stop
+        ;;
+      "Revert to Omarchy theme background")
+        if "$WE" revert; then
+          gum style --foreground 2 "Reverted to Omarchy theme background."
+        else
+          gum style --foreground 1 "Revert failed."
+        fi
+        sleep 0.7
+        ;;
+      Status)
+        we_status_text | gum pager
+        ;;
+      "Doctor (deps & paths)")
+        "$WE" doctor | gum pager
+        ;;
+      "Edit config file")
+        "$WE" config --edit
+        ;;
+      "Install menu entry")
+        "$WE" install-menu
+        gum style --foreground 2 "Menu: Style → Wallpaper Engine (GUI) + Revert + advanced TUI."
+        sleep 0.8
+        ;;
+      "Install autostart hooks")
+        "$WE" install-hooks
+        gum style --foreground 2 "post-boot + theme-set hooks installed."
+        sleep 0.8
+        ;;
+      Quit)
+        exit 0
+        ;;
+    esac
+  done
+}
+
+main_menu
