@@ -108,7 +108,7 @@ WE:      linux-wallpaperengine --layer bottom         (covers the static layer)
 
 ### Reliable per-display runtime
 
-Each configured output owns one `linux-wallpaperengine` process and one PID identity file. Applying DP-3 starts and validates only DP-3; it does not restart, reposition, or briefly replace the wallpaper on DP-2. A broken Workshop item on one output cannot terminate another output's wallpaper.
+Each configured output owns one `linux-wallpaperengine` process and one PID identity file. Applying one output starts and validates only that output; it does not restart, reposition, or briefly replace the wallpaper on any other output. A broken Workshop item on one output cannot terminate another output's wallpaper.
 
 On **Apply** for one tab:
 
@@ -157,7 +157,7 @@ Install with `we install-hooks` (Omarchy never runs plugin post-install automati
     "disable_parallax": false
   },
   "displays": {
-    "DP-2": {
+    "<display-name>": {
       "wallpaper": "823274093",
       "scaling": "fill",
       "fps": 30,
@@ -192,16 +192,17 @@ Representative command built by `we apply`:
 ```bash
 linux-wallpaperengine \
   --layer bottom --fps 30 --silent --disable-particles \
-  --screenshot ~/.local/state/omarchy/wallpaper-engine/lwe-ready.DP-3.<time>.jpg --screenshot-delay 5 \
-  --screen-root DP-3 --bg 914607822 --scaling stretch --clamp border
+  --screenshot ~/.local/state/omarchy/wallpaper-engine/lwe-ready.<display>.<time>.jpg --screenshot-delay 5 \
+  --screen-root <display> --bg 914607822 --scaling stretch --clamp border
 ```
 
 GUI / tab call sequence (one display at a time):
 
 ```bash
-we set-display DP-2 --wallpaper 823274093 --scaling fill --fps 30
-we apply DP-2                    # starts/replaces DP-2 only
-we display-config DP-2 --json    # effective settings for that tab
+display="<your-output-name>"     # from: we monitors
+we set-display "$display" --wallpaper 823274093 --scaling fill --fps 30
+we apply "$display"              # starts/replaces this output only
+we display-config "$display" --json
 # or: we status --json           # includes .effectiveDisplays
 ```
 
