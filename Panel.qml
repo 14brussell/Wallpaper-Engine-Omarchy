@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Controls as QQC
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
@@ -88,6 +89,13 @@ Item {
     if (!currentMonitor.length || !displays || typeof displays !== "object") return false
     var display = displays[currentMonitor]
     return !!(display && root.asJsString(display.wallpaper).length)
+  }
+  readonly property bool savingWallpaperDirs: actionProc.running
+    && actionProc.actionName === "set-wallpaper-dirs"
+  readonly property bool wallpaperDirsDirty: {
+    if (root.asJsString(folderPathField.text).trim().length) return true
+    return JSON.stringify(wallpaperDirsDraft || [])
+      !== JSON.stringify(extraWallpaperDirs || [])
   }
   readonly property string progressText: {
     if (busyAction.length) return busyAction
@@ -1143,7 +1151,9 @@ Item {
       padding: Style.space(16)
       modal: true
       focus: true
-      closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+      closePolicy: root.savingWallpaperDirs
+        ? Popup.NoAutoClose
+        : Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
       onOpened: Qt.callLater(function() { folderPathField.forceActiveFocus() })
       onClosed: if (root.opened) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
@@ -1187,6 +1197,7 @@ Item {
             tooltipText: "Close"
             foreground: root.fg
             fontFamily: root.fontFamily
+            enabled: !root.savingWallpaperDirs
             onClicked: wallpaperDirsPopup.close()
           }
         }
@@ -1244,6 +1255,8 @@ Item {
           }
 
           ListView {
+            id: wallpaperDirsList
+            readonly property bool hasVerticalOverflow: contentHeight > height + 0.5
             anchors.fill: parent
             anchors.margins: Style.space(6)
             visible: root.wallpaperDirsDraft.length > 0
@@ -1251,6 +1264,26 @@ Item {
             spacing: Style.space(4)
             clip: true
             boundsBehavior: Flickable.StopAtBounds
+            QQC.ScrollBar.vertical: QQC.ScrollBar {
+              id: wallpaperDirsScrollBar
+              policy: wallpaperDirsList.hasVerticalOverflow
+                ? QQC.ScrollBar.AsNeeded
+                : QQC.ScrollBar.AlwaysOff
+
+              contentItem: Rectangle {
+                implicitWidth: Style.space(6)
+                implicitHeight: Style.space(32)
+                radius: width / 2
+                color: Color.accent
+                opacity: wallpaperDirsScrollBar.pressed || wallpaperDirsScrollBar.hovered ? 1 : 0.82
+
+                Behavior on opacity {
+                  NumberAnimation { duration: 100 }
+                }
+              }
+
+              background: Item {}
+            }
 
             delegate: RowLayout {
               required property string modelData
@@ -1283,7 +1316,7 @@ Item {
           Layout.fillWidth: true
           visible: root.wallpaperDirsError.length > 0
           text: root.wallpaperDirsError
-          color: "#ef7777"
+          color: Color.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
@@ -1299,19 +1332,19 @@ Item {
             text: "Cancel"
             foreground: root.fg
             bordered: true
-            enabled: !actionProc.running
+            enabled: !root.savingWallpaperDirs
             onClicked: wallpaperDirsPopup.close()
           }
 
           Button {
-            text: actionProc.running && actionProc.actionName === "set-wallpaper-dirs"
+            text: root.savingWallpaperDirs
               ? "Saving…" : "Save folders"
             iconText: "󰆓"
             foreground: root.fg
             accent: Color.accent
             active: true
             bordered: true
-            enabled: !actionProc.running && !root.displayBusy
+            enabled: !actionProc.running && !root.displayBusy && root.wallpaperDirsDirty
             onClicked: root.saveWallpaperFolders()
           }
         }
