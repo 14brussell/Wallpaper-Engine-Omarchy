@@ -39,6 +39,7 @@ Item {
 
   signal applied()
   signal refreshNeeded()
+  signal editWallpaperFoldersRequested()
   signal statusMessage(string text)
   signal loadFinished()
   signal errorOccurred(string message)
@@ -910,10 +911,27 @@ Item {
         anchors.margins: Style.space(12)
         spacing: Style.space(8)
 
-        PanelSectionHeader {
-          text: "WORKSHOP WALLPAPERS"
-          foreground: root.fg
-          fontFamily: root.fontFamily
+        RowLayout {
+          Layout.fillWidth: true
+          spacing: Style.space(8)
+
+          PanelSectionHeader {
+            Layout.fillWidth: true
+            text: "WORKSHOP WALLPAPERS"
+            foreground: root.fg
+            fontFamily: root.fontFamily
+          }
+
+          Button {
+            text: "Folders"
+            iconText: "󰉖"
+            tooltipText: "Manage wallpaper folders"
+            foreground: root.fg
+            fontFamily: root.fontFamily
+            bordered: true
+            enabled: !root.actionsBlocked && !listProc.running
+            onClicked: root.editWallpaperFoldersRequested()
+          }
         }
 
         TextField {

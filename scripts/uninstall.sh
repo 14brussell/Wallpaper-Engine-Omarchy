@@ -17,6 +17,7 @@ MENU_FILE="${WE_MENU_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/extensions/
 BIN_DIR="${WE_BIN_DIR:-$HOME/.local/bin}"
 CONFIG_DIR="${WE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/wallpaper-engine}"
 STATE_DIR="${WE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/wallpaper-engine}"
+AUTO_THEME_DIR="${WE_AUTO_THEME_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/themes/wallpaper-engine-auto-match}"
 CONTROLLER="${WE_CONTROLLER:-$ROOT/bin/we}"
 HOOK_MARKER="# wallpaper-engine-omarchy"
 MENU_MARKER="  // Added by wallpaper-engine-omarchy"
@@ -28,7 +29,8 @@ Usage: uninstall.sh [--purge]
 Stops Wallpaper Engine, restores the Omarchy theme background when possible,
 and removes only verified plugin-owned hooks, menu entries, and command links.
 Configuration and runtime state are preserved by default. --purge permanently
-removes both plugin-owned data directories after the integrations are removed.
+removes both plugin-owned data directories and the verified generated auto-theme
+after the integrations are removed.
 EOF
 }
 
@@ -37,13 +39,14 @@ note_preserved() {
 }
 
 run_controller() {
-  local command=$1
+  local command=$1 timeout_s=20
+  [[ $command == undo-auto-theme ]] && timeout_s=120
   [[ -f $CONTROLLER ]] || return 127
   if command -v timeout >/dev/null 2>&1; then
     if [[ -x $CONTROLLER ]]; then
-      timeout -k 2 20 "$CONTROLLER" "$command"
+      timeout -k 2 "$timeout_s" "$CONTROLLER" "$command"
     else
-      timeout -k 2 20 bash "$CONTROLLER" "$command"
+      timeout -k 2 "$timeout_s" bash "$CONTROLLER" "$command"
     fi
   elif [[ -x $CONTROLLER ]]; then
     "$CONTROLLER" "$command"
@@ -53,6 +56,14 @@ run_controller() {
 }
 
 restore_background_and_stop() {
+  if [[ -f $CONFIG_DIR/config.json ]] \
+    && jq -e '.auto_theme.active == true' "$CONFIG_DIR/config.json" >/dev/null 2>&1; then
+    if run_controller undo-auto-theme; then
+      echo "Restored the theme selected before wallpaper auto-match."
+    else
+      echo "Could not restore the theme selected before wallpaper auto-match." >&2
+    fi
+  fi
   if run_controller revert; then
     echo "Stopped Wallpaper Engine and restored the Omarchy theme background."
     return 0
@@ -159,6 +170,17 @@ validate_purge_data_dir() {
   fi
 }
 
+validate_auto_theme_dir() {
+  local path=$1 base parent
+  base=$(basename -- "$path")
+  parent=$(basename -- "$(dirname -- "$path")")
+  if [[ -z $path || $path != /* || $path == / || $path == "$HOME" \
+    || $base != wallpaper-engine-auto-match || $parent != themes ]]; then
+    printf 'Refusing to purge unsafe generated theme path: %s\n' "$path" >&2
+    return 1
+  fi
+}
+
 purge_data_dir() {
   local path=$1 label=$2
   if [[ -e $path || -L $path ]]; then
@@ -174,10 +196,17 @@ purge_plugin_data() {
   if [[ $STATE_DIR != "$CONFIG_DIR" ]]; then
     validate_purge_data_dir "$STATE_DIR" 'runtime state'
   fi
+  validate_auto_theme_dir "$AUTO_THEME_DIR"
 
   purge_data_dir "$CONFIG_DIR" configuration
   if [[ $STATE_DIR != "$CONFIG_DIR" ]]; then
     purge_data_dir "$STATE_DIR" 'runtime state'
+  fi
+  if [[ -f $AUTO_THEME_DIR/.wallpaper-engine-omarchy-generated ]]; then
+    rm -rf -- "$AUTO_THEME_DIR"
+    printf 'Purged generated auto-theme: %s\n' "$AUTO_THEME_DIR"
+  elif [[ -e $AUTO_THEME_DIR || -L $AUTO_THEME_DIR ]]; then
+    note_preserved "$AUTO_THEME_DIR"
   fi
 }
 

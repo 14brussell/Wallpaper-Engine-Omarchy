@@ -35,6 +35,38 @@ test_symlinked_cli() {
       >/dev/null
 }
 
+test_additional_wallpaper_folders() {
+  local home="$TEST_ROOT/wallpaper-folders-home"
+  local library="$TEST_ROOT/Steam Library"
+  local workshop="$library/steamapps/workshop/content/431960"
+  local output="$TEST_ROOT/wallpaper-folders-output"
+  mkdir -p "$home" "$workshop/123456"
+  printf '{"title":"External Test","type":"scene"}\n' >"$workshop/123456/project.json"
+
+  HOME=$home "$ROOT/bin/we" set-wallpaper-dirs "$library" >/dev/null
+
+  HOME=$home "$ROOT/bin/we" wallpaper-dirs --json \
+    | jq -e --arg root "$workshop" \
+      '.additional == [$root] and (.effective | index($root) != null)' \
+      >/dev/null
+  HOME=$home "$ROOT/bin/we" list --json \
+    | jq -e --arg root "$workshop/123456" \
+      'any(.[]; .id == "123456" and .path == $root)' \
+      >/dev/null
+
+  if HOME=$home "$ROOT/bin/we" set-wallpaper-dirs "$TEST_ROOT/not-mounted" \
+      >"$output" 2>&1; then
+    fail 'set-wallpaper-dirs accepted a nonexistent folder'
+  fi
+  HOME=$home "$ROOT/bin/we" wallpaper-dirs --json \
+    | jq -e --arg root "$workshop" '.additional == [$root]' \
+      >/dev/null
+
+  HOME=$home "$ROOT/bin/we" set-wallpaper-dirs >/dev/null
+  HOME=$home "$ROOT/bin/we" wallpaper-dirs --json \
+    | jq -e '.additional == []' >/dev/null
+}
+
 test_legacy_preflight() {
   local home="$TEST_ROOT/legacy-home"
   local legacy="$home/.config/omarchy/plugins/$LEGACY_PLUGIN_ID"
@@ -99,9 +131,12 @@ test_uninstall_preserves_data() {
 test_uninstall_purges_data() {
   local home="$TEST_ROOT/purge-home"
   seed_plugin_data "$home"
+  mkdir -p "$home/.config/omarchy/themes/wallpaper-engine-auto-match"
+  printf 'generated\n' >"$home/.config/omarchy/themes/wallpaper-engine-auto-match/.wallpaper-engine-omarchy-generated"
   run_uninstall "$home" --purge
   assert_absent "$home/.config/omarchy/wallpaper-engine"
   assert_absent "$home/.local/state/omarchy/wallpaper-engine"
+  assert_absent "$home/.config/omarchy/themes/wallpaper-engine-auto-match"
 }
 
 test_uninstall_refuses_unsafe_purge_path() {
@@ -152,6 +187,7 @@ test_uninstall_validates_all_paths_before_purge() {
 }
 
 test_symlinked_cli
+test_additional_wallpaper_folders
 test_legacy_preflight
 test_uninstall_preserves_data
 test_uninstall_purges_data

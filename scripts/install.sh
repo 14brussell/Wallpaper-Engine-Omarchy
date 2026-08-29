@@ -59,6 +59,7 @@ set_tree_modes() {
   chmod +x \
     "$root/bin/we" \
     "$root/lib/compose_desktop.py" \
+    "$root/lib/generate_theme.py" \
     "$root/scripts/we-menu" \
     "$root/scripts/we-menu-entry" \
     "$root/scripts/we-stage-transition" \
@@ -81,7 +82,7 @@ validate_stage() {
         ;;
     esac
   done
-  python3 -m py_compile "$root/lib/compose_desktop.py"
+  python3 -m py_compile "$root/lib/compose_desktop.py" "$root/lib/generate_theme.py"
   if command -v qmllint >/dev/null 2>&1; then
     qml_lint=$(command -v qmllint)
   elif [[ -x /usr/lib/qt6/bin/qmllint ]]; then

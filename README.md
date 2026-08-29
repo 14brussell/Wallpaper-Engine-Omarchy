@@ -18,8 +18,10 @@ Display names and resolutions are detected from each user’s Hyprland setup.
 
 - Quickshell panel with one tab per display
 - Workshop browser with thumbnails, search, and wallpaper properties
+- Additional Steam libraries on other disks, managed from the GUI or CLI
 - Per-display wallpapers, scaling, FPS, audio, and other engine settings
 - Safe replacement: a new wallpaper must render before the old one stops
+- Reversible Omarchy color themes generated from the active wallpaper
 - Theme restore, bar widget, CLI, hooks, and an optional gum TUI
 
 ## Requirements
@@ -28,6 +30,7 @@ Display names and resolutions are detected from each user’s Hyprland setup.
 - [linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) (`linux-wallpaperengine-git` from the AUR)
 - Wallpaper Engine on Steam, including downloaded Workshop content
 - `jq` and `hyprctl` (included with a normal Omarchy install)
+- `python-pillow` for the wallpaper-to-theme auto-match action
 - `gum` only if you want the advanced TUI
 
 ## Install
@@ -82,8 +85,10 @@ runtime state before asking Omarchy to remove the checkout:
 omarchy plugin remove io.github.14brussell.wallpaper-engine
 ```
 
-`--purge` is irreversible and does not uninstall Omarchy, Wallpaper Engine,
-`linux-wallpaperengine`, or any other dependency.
+`--purge` is irreversible. It also removes the generated
+`wallpaper-engine-auto-match` theme when its ownership marker is present, but
+does not uninstall Omarchy, Wallpaper Engine, `linux-wallpaperengine`, or any
+other dependency.
 
 ## Usage
 
@@ -96,11 +101,22 @@ omarchy plugin remove io.github.14brussell.wallpaper-engine
 
 Open it from the Style menu, bar widget, or `omarchy-we panel`. Each live Hyprland display gets its own tab. Choose a wallpaper, adjust its settings, and click **Apply**. **Clear** removes only that display's configuration.
 
+Use the folder button beside **Workshop Wallpapers** to add libraries from
+other disks. You can paste a Steam library directory, its `steamapps`
+directory, or the exact `workshop/content/431960` directory. Added folders are
+shared by every display and automatic Steam locations remain enabled.
+
 The controls above the tabs apply globally:
 
 - **Start:** start every configured display
 - **Stop:** stop all Wallpaper Engine processes owned by the plugin
 - **Revert to theme:** stop them and restore the Omarchy theme background
+- **Auto-match theme:** build and apply an accessible Omarchy palette from the selected display's rendered wallpaper. The button becomes **Undo theme match** and restores the previously selected theme.
+
+Auto-match writes only to the plugin-owned custom theme at
+`~/.config/omarchy/themes/wallpaper-engine-auto-match`. It refuses to overwrite
+that path if it contains a theme not created by this plugin. Choosing another
+Omarchy theme manually also clears the pending auto-match undo state.
 
 ### Advanced TUI
 
@@ -165,7 +181,8 @@ Set `"nvidia_workaround": true` to run the engine with `__GL_THREADED_OPTIMIZATI
 
 - Runtime state and logs: `~/.local/state/omarchy/wallpaper-engine/`
 - Workshop projects: Steam `workshop/content/431960/<id>/project.json`
-- Extra Workshop locations: add `workshop_dirs` to the config
+- Extra Workshop locations: manage them from the folder button in the GUI, or
+  run `omarchy-we set-wallpaper-dirs <path>...`
 
 ## CLI
 
@@ -174,6 +191,8 @@ omarchy-we panel
 omarchy-we apply [monitor]
 omarchy-we stop
 omarchy-we revert
+omarchy-we auto-theme [monitor]
+omarchy-we undo-auto-theme
 omarchy-we menu
 omarchy-we monitors
 omarchy-we status --json
@@ -188,6 +207,7 @@ Panel.qml / DisplayTab.qml   Quickshell UI
 BarWidget.qml                Bar launcher
 bin/we                       CLI
 lib/common.sh                Engine and theme integration
+lib/generate_theme.py        Wallpaper palette generator
 scripts/                     Installer, TUI, and menu helpers
 hooks/                       Boot and theme hooks
 ```

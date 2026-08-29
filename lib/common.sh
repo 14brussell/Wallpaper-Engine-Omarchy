@@ -18,6 +18,10 @@ WE_LOG_FILE="$WE_STATE_DIR/engine.log"
 WE_ACTIVE_FLAG="$WE_STATE_DIR/active"
 WE_PLACEHOLDER="$WE_PLUGIN_ROOT/assets/we-placeholder.png"
 WE_COMPOSE_PY="${WE_COMPOSE_PY:-$WE_PLUGIN_ROOT/lib/compose_desktop.py}"
+WE_THEME_GENERATOR="${WE_THEME_GENERATOR:-$WE_PLUGIN_ROOT/lib/generate_theme.py}"
+WE_AUTO_THEME_SLUG="${WE_AUTO_THEME_SLUG:-wallpaper-engine-auto-match}"
+WE_USER_THEMES_DIR="${WE_USER_THEMES_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/themes}"
+WE_AUTO_THEME_DIR="${WE_AUTO_THEME_DIR:-$WE_USER_THEMES_DIR/$WE_AUTO_THEME_SLUG}"
 WE_BG_WAS_DISABLED_FLAG="$WE_STATE_DIR/disabled-omarchy-background"
 WE_TRANSITION_DIR="${WE_TRANSITION_DIR:-$WE_STATE_DIR/transitions}"
 WE_BG_QUEUE_LOCK="${WE_BG_QUEUE_LOCK:-$WE_STATE_DIR/transition.lock}"
@@ -77,7 +81,12 @@ we_default_config_json() {
   },
   "displays": {},
   "active": false,
-  "saved_theme_background": null
+  "saved_theme_background": null,
+  "auto_theme": {
+    "active": false,
+    "previous_theme": null,
+    "source_monitor": null
+  }
 }
 EOF
 }
@@ -222,9 +231,37 @@ we_workshop_dirs() {
   if [[ -n $configured ]]; then
     printf '%s\n' "$configured"
   else
-    we_default_workshop_dirs
+    # No detected Steam roots is valid when every library is on another disk.
+    # Do not let the probe's false status skip extra_wallpaper_dirs under set -e.
+    we_default_workshop_dirs || true
   fi
   we_jq -r '.extra_wallpaper_dirs // [] | .[]' 2>/dev/null || true
+}
+
+# Resolve a user-selected folder to the Workshop content root. The GUI accepts
+# either that exact directory or a Steam library / steamapps / workshop parent
+# so users do not have to reconstruct Steam's nested path by hand.
+we_normalize_wallpaper_dir() {
+  local input=${1:-} candidate
+  [[ -n $input ]] || return 1
+  case "$input" in
+    '~') input=$HOME ;;
+    '~/'*) input="$HOME/${input#\~/}" ;;
+  esac
+  [[ $input == /* ]] || input="$PWD/$input"
+
+  for candidate in \
+    "$input/steamapps/workshop/content/$WE_APPID" \
+    "$input/workshop/content/$WE_APPID" \
+    "$input/content/$WE_APPID" \
+    "$input"; do
+    if [[ -d $candidate ]]; then
+      realpath -- "$candidate"
+      return 0
+    fi
+  done
+  echo "Wallpaper folder does not exist: $input" >&2
+  return 1
 }
 
 # Resolve a wallpaper id or path to an absolute directory (or numeric id string).
@@ -677,6 +714,7 @@ we_status_json() {
     --arg logPath "$WE_LOG_FILE" \
     --argjson engineRunning "$([[ $engine == running ]] && echo true || echo false)" \
     --argjson configuredDisplayCount "${configured_count:-0}" \
+    --arg autoThemeSlug "$WE_AUTO_THEME_SLUG" \
     '{
       active: ($config.active // false),
       engine: $engine,
@@ -694,7 +732,12 @@ we_status_json() {
       monitors: $monitors,
       monitorNames: $monitorNames,
       monitorTitles: $monitorTitles,
-      savedThemeBackground: ($config.saved_theme_background // null)
+      workshopDirs: ($config.workshop_dirs // []),
+      extraWallpaperDirs: ($config.extra_wallpaper_dirs // []),
+      savedThemeBackground: ($config.saved_theme_background // null),
+      autoThemeActive: (($config.auto_theme.active // false) and ($theme == $autoThemeSlug)),
+      autoThemePrevious: ($config.auto_theme.previous_theme // null),
+      autoThemeSourceMonitor: ($config.auto_theme.source_monitor // null)
     }'
 }
 
@@ -2562,6 +2605,10 @@ we_monitor_key() {
   printf '%s' "${1:-}" | sed 's/[^A-Za-z0-9_.-]/_/g'
 }
 
+we_wallpaper_key() {
+  printf '%s' "${1:-}" | sha256sum | cut -c1-16
+}
+
 we_monitor_pid_file() {
   printf '%s/%s.pid\n' "$WE_PID_DIR" "$(we_monitor_key "$1")"
 }
@@ -2611,7 +2658,7 @@ we_restore_non_placeholder_background() {
 }
 
 we_start_engine_monitor() {
-  local monitor=$1 wallpaper resolved key pid_file log_file old_identity
+  local monitor=$1 wallpaper resolved key wallpaper_key pid_file log_file old_identity
   local screenshot engine_pid engine_start pid_ready=false pid_tmp i
   local project_type particles_disabled painted=true engine_alive=true
   local -a args=() env_prefix=()
@@ -2630,10 +2677,11 @@ we_start_engine_monitor() {
   particles_disabled=$(we_effective_display_json "$monitor" | jq -r '.disableParticles // false')
 
   key=$(we_monitor_key "$monitor")
+  wallpaper_key=$(we_wallpaper_key "$wallpaper")
   pid_file=$(we_monitor_pid_file "$monitor")
   log_file=$(we_monitor_log_file "$monitor")
   old_identity=$(we_owned_pid_identity "$pid_file" 2>/dev/null || true)
-  screenshot="$WE_STATE_DIR/lwe-ready.${key}.$(we_now_ms).jpg"
+  screenshot="$WE_STATE_DIR/lwe-ready.${key}.${wallpaper_key}.$(we_now_ms).jpg"
 
   # Dynamic scope: argv builder and paint probe use this monitor's unique FBO.
   local WE_LWE_SCREENSHOT="$screenshot"
@@ -2768,6 +2816,167 @@ we_start_engine() {
     we_notify "Wallpaper Engine failed to apply"
   fi
   return "$rc"
+}
+
+we_auto_theme_source_image() {
+  local monitor=${1:-} key wallpaper_key latest wallpaper resolved geometry width height rendered preview
+  [[ -n $monitor ]] || {
+    echo "No display was selected for auto-match." >&2
+    return 1
+  }
+  wallpaper=$(we_display_wallpaper "$monitor")
+  [[ -n $wallpaper ]] || {
+    echo "Display $monitor has no wallpaper configured. Pick and apply one first." >&2
+    return 1
+  }
+
+  # The readiness image is an actual linux-wallpaperengine framebuffer, so it
+  # represents Scene/Web wallpapers better than their Workshop thumbnail. The
+  # wallpaper key prevents a prior framebuffer for this monitor from being
+  # reused after set-display changes its configured wallpaper.
+  key=$(we_monitor_key "$monitor")
+  wallpaper_key=$(we_wallpaper_key "$wallpaper")
+  latest=$(find "$WE_STATE_DIR" -maxdepth 1 -type f \
+    -name "lwe-ready.${key}.${wallpaper_key}.*.jpg" \
+    -printf '%T@\t%p\n' 2>/dev/null | sort -nr | head -n1 | cut -f2-)
+  if [[ -n $latest && -f $latest ]]; then
+    printf '%s\n' "$latest"
+    return 0
+  fi
+
+  resolved=$(we_resolve_wallpaper "$wallpaper" 2>/dev/null || true)
+  [[ -n $resolved && -d $resolved ]] || {
+    echo "Could not resolve wallpaper $wallpaper for $monitor." >&2
+    return 1
+  }
+  geometry=$(we_monitors_json 2>/dev/null | jq -r --arg m "$monitor" \
+    '.[] | select(.name == $m) | [(.width // 1920), (.height // 1080)] | @tsv' | head -n1)
+  read -r width height <<<"${geometry:-1920 1080}"
+  [[ $width =~ ^[1-9][0-9]*$ ]] || width=1920
+  [[ $height =~ ^[1-9][0-9]*$ ]] || height=1080
+  rendered="$WE_STATE_DIR/auto-theme-source.${key}.$(we_now_ms).jpg"
+  if we_render_output_still "$wallpaper" "$width" "$height" "$rendered" \
+    "$(we_display_setting "$monitor" scaling 2>/dev/null || echo fill)" >/dev/null 2>&1; then
+    printf '%s\n' "$rendered"
+    return 0
+  fi
+
+  preview=$(we_wallpaper_preview_file "$resolved" 2>/dev/null || true)
+  if [[ -n $preview && -f $preview ]]; then
+    printf '%s\n' "$preview"
+    return 0
+  fi
+  echo "Could not capture a usable image from wallpaper $wallpaper." >&2
+  return 1
+}
+
+we_theme_exists() {
+  local slug=${1:-}
+  [[ -n $slug && $slug != */* && $slug != .* ]] || return 1
+  [[ -d $WE_USER_THEMES_DIR/$slug || -d /usr/share/omarchy/themes/$slug ]]
+}
+
+we_apply_auto_theme() {
+  we_load_config
+  local monitor=${1:-} current previous source stage backup old_state applied_theme
+  [[ -n $monitor ]] || monitor=$(we_configured_monitors | head -n1)
+  [[ -x $WE_THEME_GENERATOR || -f $WE_THEME_GENERATOR ]] || {
+    echo "Auto-theme generator is missing: $WE_THEME_GENERATOR" >&2
+    return 1
+  }
+  command -v python3 >/dev/null 2>&1 || {
+    echo "Auto-match requires python3." >&2
+    return 1
+  }
+  command -v omarchy >/dev/null 2>&1 || {
+    echo "Auto-match requires the Omarchy theme command." >&2
+    return 1
+  }
+
+  current=$(we_current_theme_name)
+  old_state=$(we_jq -c '.auto_theme // {active:false, previous_theme:null, source_monitor:null}')
+  previous=$(jq -r '.previous_theme // empty' <<<"$old_state")
+  if [[ $current != "$WE_AUTO_THEME_SLUG" ]]; then
+    previous=$current
+  elif [[ -z $previous ]]; then
+    echo "The generated theme is already selected, but its prior theme is unknown. Select another theme first." >&2
+    return 1
+  fi
+  [[ -n $previous && $previous != "$WE_AUTO_THEME_SLUG" ]] || {
+    echo "Could not determine a theme to restore before auto-matching." >&2
+    return 1
+  }
+
+  source=$(we_auto_theme_source_image "$monitor") || return 1
+  mkdir -p "$WE_USER_THEMES_DIR"
+  if [[ -e $WE_AUTO_THEME_DIR && ! -f $WE_AUTO_THEME_DIR/.wallpaper-engine-omarchy-generated ]]; then
+    echo "Refusing to overwrite non-plugin theme: $WE_AUTO_THEME_DIR" >&2
+    return 1
+  fi
+  stage=$(mktemp -d "$WE_USER_THEMES_DIR/.${WE_AUTO_THEME_SLUG}.stage.XXXXXX")
+  if ! python3 "$WE_THEME_GENERATOR" "$source" "$stage"; then
+    rm -rf -- "$stage"
+    return 1
+  fi
+
+  backup=""
+  if [[ -d $WE_AUTO_THEME_DIR ]]; then
+    backup="$WE_USER_THEMES_DIR/.${WE_AUTO_THEME_SLUG}.previous.$$"
+    mv -- "$WE_AUTO_THEME_DIR" "$backup"
+  fi
+  if ! mv -- "$stage" "$WE_AUTO_THEME_DIR"; then
+    [[ -n $backup && -d $backup ]] && mv -- "$backup" "$WE_AUTO_THEME_DIR"
+    rm -rf -- "$stage"
+    return 1
+  fi
+  [[ -n $backup && -d $backup ]] && rm -rf -- "$backup"
+
+  we_jq_write \
+    --arg previous "$previous" \
+    --arg monitor "$monitor" \
+    --arg source "$(realpath "$source")" \
+    '.auto_theme = {
+      active: true,
+      previous_theme: $previous,
+      source_monitor: $monitor,
+      source_image: $source
+    }'
+
+  if ! omarchy theme set "$WE_AUTO_THEME_SLUG"; then
+    applied_theme=$(we_current_theme_name)
+    if [[ $applied_theme != "$WE_AUTO_THEME_SLUG" ]]; then
+      we_jq_write --argjson old "$old_state" '.auto_theme = $old'
+    fi
+    echo "Omarchy could not apply the generated wallpaper theme." >&2
+    return 1
+  fi
+  we_notify "Theme auto-matched to $monitor wallpaper"
+  echo "Auto-matched Omarchy theme to the wallpaper on $monitor."
+}
+
+we_undo_auto_theme() {
+  we_load_config
+  local previous
+  previous=$(we_jq -r '.auto_theme.previous_theme // empty')
+  [[ $(we_jq -r '.auto_theme.active // false') == true && -n $previous ]] || {
+    echo "No auto-matched theme change is available to undo." >&2
+    return 1
+  }
+  we_theme_exists "$previous" || {
+    echo "The previous Omarchy theme no longer exists: $previous" >&2
+    return 1
+  }
+  command -v omarchy >/dev/null 2>&1 || {
+    echo "Undo requires the Omarchy theme command." >&2
+    return 1
+  }
+  if ! omarchy theme set "$previous"; then
+    echo "Omarchy could not restore the previous theme: $previous" >&2
+    return 1
+  fi
+  we_jq_write '.auto_theme = {active:false, previous_theme:null, source_monitor:null}'
+  we_notify "Restored theme $previous"
+  echo "Restored Omarchy theme: $previous"
 }
 
 we_revert_to_theme() {

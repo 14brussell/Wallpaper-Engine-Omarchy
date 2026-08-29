@@ -57,6 +57,13 @@ we_hook_first_theme_bg() {
 we_bg_queue_enter
 we_load_config
 
+# A theme selected outside the auto-match action is itself a valid undo. Clear
+# the toggle state so the panel never offers to restore a stale prior theme.
+auto_active=$(we_jq -r '.auto_theme.active // false')
+if [[ $auto_active == true && $THEME_SLUG != "$WE_AUTO_THEME_SLUG" ]]; then
+  we_jq_write '.auto_theme = {active:false, previous_theme:null, source_monitor:null}' || true
+fi
+
 active=$(we_jq -r '.active // false')
 if [[ $active != true ]]; then
   exit 0

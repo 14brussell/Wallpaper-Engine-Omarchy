@@ -29,12 +29,17 @@ Commands:
   display-config <mon> [--json]
                                Effective settings for one display (defaults + overrides)
   list [--json]                List Workshop wallpapers (scan project.json)
+  wallpaper-dirs [--json]      Show automatic, additional, and effective roots
+  set-wallpaper-dirs [dir...]  Replace additional roots (empty list clears them)
   monitors [--json]            List displays (name, or JSON with width/height)
   apply [monitor...]           Start/replace only the named display processes;
                                without names, independently apply all configured displays
   stop [monitor...]            Stop named display processes, or all when omitted;
                                leave the Omarchy theme background in place
   revert                       Stop WE and restore Omarchy theme background
+  auto-theme [monitor]         Generate/apply an Omarchy color theme from the
+                               configured wallpaper on a display
+  undo-auto-theme              Restore the theme active before auto-match
   set-display <monitor> [opts] Configure one display (--json → effective settings)
   set-defaults [opts]          Configure global defaults
   set-property <mon> <k> <v>   Set a wallpaper --set-property for a display
@@ -484,6 +489,23 @@ cmd_revert() {
   we_revert_to_theme
 }
 
+cmd_auto_theme() {
+  local monitor=${1:-}
+  [[ $# -le 1 ]] || {
+    echo "Usage: we auto-theme [monitor]" >&2
+    return 1
+  }
+  we_apply_auto_theme "$monitor"
+}
+
+cmd_undo_auto_theme() {
+  [[ $# -eq 0 ]] || {
+    echo "Usage: we undo-auto-theme" >&2
+    return 1
+  }
+  we_undo_auto_theme
+}
+
 cmd_panel() {
   if command -v omarchy-shell >/dev/null 2>&1; then
     omarchy-shell shell summon "$PLUGIN_ID" ""
@@ -504,6 +526,61 @@ cmd_set_property() {
   we_jq_write --arg m "$monitor" --arg k "$key" --arg v "$value" \
     '.displays[$m].properties = ((.displays[$m].properties // {}) + {($k): $v})'
   echo "Set $monitor property $key=$value (passed as --set-property on apply)"
+}
+
+cmd_wallpaper_dirs() {
+  we_load_config
+  local automatic configured additional effective
+  automatic=$({ we_default_workshop_dirs || true; } | jq -R . | jq -cs 'map(select(length > 0))')
+  configured=$(we_jq -c '.workshop_dirs // []')
+  additional=$(we_jq -c '.extra_wallpaper_dirs // []')
+  effective=$(we_workshop_dirs | awk 'NF && !seen[$0]++' | jq -R . | jq -cs '.')
+  if [[ ${1:-} == --json ]]; then
+    jq -cn \
+      --argjson automatic "$automatic" \
+      --argjson configured "$configured" \
+      --argjson additional "$additional" \
+      --argjson effective "$effective" \
+      '{automatic: $automatic, configured: $configured, additional: $additional, effective: $effective}'
+    return
+  fi
+  if [[ $configured != '[]' ]]; then
+    echo "Configured Workshop folders:"
+    jq -r '.[] | "  " + .' <<<"$configured"
+  else
+    echo "Automatic Workshop folders:"
+    if [[ $automatic == '[]' ]]; then
+      echo "  (none found)"
+    else
+      jq -r '.[] | "  " + .' <<<"$automatic"
+    fi
+  fi
+  echo "Additional wallpaper folders:"
+  if [[ $additional == '[]' ]]; then
+    echo "  (none)"
+  else
+    jq -r '.[] | "  " + .' <<<"$additional"
+  fi
+}
+
+cmd_set_wallpaper_dirs() {
+  we_load_config
+  local input normalized dirs_json
+  local -a dirs=()
+  declare -A seen=()
+  for input in "$@"; do
+    normalized=$(we_normalize_wallpaper_dir "$input") || return 1
+    [[ -z ${seen[$normalized]+x} ]] || continue
+    seen[$normalized]=1
+    dirs+=("$normalized")
+  done
+  dirs_json=$(jq -cn --args '$ARGS.positional' "${dirs[@]}")
+  we_jq_write --argjson dirs "$dirs_json" '.extra_wallpaper_dirs = $dirs'
+  if ((${#dirs[@]} == 1)); then
+    echo "Saved 1 additional wallpaper folder."
+  else
+    printf 'Saved %d additional wallpaper folders.\n' "${#dirs[@]}"
+  fi
 }
 
 cmd_browse() {
@@ -585,11 +662,11 @@ cmd_doctor() {
     fi
   done
   if python3 -c 'from PIL import Image' 2>/dev/null; then
-    echo "dep python3-pillow: OK"
+    echo "dep python3-pillow: OK (auto-theme + image composition)"
   elif command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1; then
-    echo "dep pillow: missing (ImageMagick fallback OK)"
+    echo "dep python3-pillow: missing (auto-theme unavailable; ImageMagick composition fallback OK)"
   else
-    echo "dep pillow: missing (need python-pillow or ImageMagick to compose canvases)"
+    echo "dep python3-pillow: missing (install python-pillow for auto-theme and image composition)"
   fi
   echo
   echo "Workshop dirs:"
@@ -623,6 +700,8 @@ main() {
         done
       fi
       ;;
+    wallpaper-dirs) cmd_wallpaper_dirs "$@" ;;
+    set-wallpaper-dirs) cmd_set_wallpaper_dirs "$@" ;;
     monitors)
       if [[ ${1:-} == --json ]]; then
         we_monitors_json
@@ -637,6 +716,8 @@ main() {
     apply) cmd_apply "$@" ;;
     stop) cmd_stop "$@" ;;
     revert) cmd_revert ;;
+    auto-theme) cmd_auto_theme "$@" ;;
+    undo-auto-theme) cmd_undo_auto_theme "$@" ;;
     set-display) cmd_set_display "$@" ;;
     set-defaults) cmd_set_defaults "$@" ;;
     set-property) cmd_set_property "$@" ;;

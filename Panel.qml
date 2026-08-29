@@ -8,7 +8,7 @@ import qs.Ui
 
 // Wallpaper Engine control surface — tileable FloatingWindow (no modal scrim).
 // One tab per detected display; settings + Apply live inside DisplayTab.
-// Global actions: Start (when stopped), Stop engine, Revert to theme.
+// Global actions: Start, Stop, Revert background, and reversible auto-theme.
 Item {
   id: root
 
@@ -35,6 +35,11 @@ Item {
   property bool hasConfiguredDisplays: false
   property bool displayBusy: false
   property string themeName: ""
+  property bool autoThemeActive: false
+  property string autoThemePrevious: ""
+  property var extraWallpaperDirs: []
+  property var wallpaperDirsDraft: []
+  property string wallpaperDirsError: ""
   property int currentTabIndex: 0
 
   readonly property string pluginRoot: {
@@ -79,6 +84,11 @@ Item {
     return root.currentMonitor
   }
   readonly property bool applyInFlight: displayBusy || actionProc.running
+  readonly property bool currentHasWallpaper: {
+    if (!currentMonitor.length || !displays || typeof displays !== "object") return false
+    var display = displays[currentMonitor]
+    return !!(display && root.asJsString(display.wallpaper).length)
+  }
   readonly property string progressText: {
     if (busyAction.length) return busyAction
     if (displayBusy) return "Applying…"
@@ -320,6 +330,40 @@ Item {
     return root.monitorEntry(m).title
   }
 
+  function openWallpaperFolders() {
+    wallpaperDirsDraft = extraWallpaperDirs ? extraWallpaperDirs.slice(0) : []
+    wallpaperDirsError = ""
+    folderPathField.text = ""
+    wallpaperDirsPopup.open()
+  }
+
+  function addWallpaperFolder() {
+    var path = root.asJsString(folderPathField.text).trim()
+    if (!path.length) return false
+    var next = wallpaperDirsDraft ? wallpaperDirsDraft.slice(0) : []
+    if (next.indexOf(path) < 0)
+      next.push(path)
+    wallpaperDirsDraft = next
+    folderPathField.text = ""
+    wallpaperDirsError = ""
+    return true
+  }
+
+  function removeWallpaperFolder(index) {
+    var next = wallpaperDirsDraft ? wallpaperDirsDraft.slice(0) : []
+    if (index >= 0 && index < next.length)
+      next.splice(index, 1)
+    wallpaperDirsDraft = next
+    wallpaperDirsError = ""
+  }
+
+  function saveWallpaperFolders() {
+    if (root.asJsString(folderPathField.text).trim().length)
+      root.addWallpaperFolder()
+    wallpaperDirsError = ""
+    runWe(["set-wallpaper-dirs"].concat(wallpaperDirsDraft), "Saving wallpaper folders…")
+  }
+
   function open(payloadJson) {
     // Never summon another shell surface from this panel. Host summon already
     // delivered us here, and wallpaper lifecycle stays in the backend.
@@ -348,6 +392,7 @@ Item {
     opened = false
     busyAction = ""
     statusMessage = ""
+    wallpaperDirsPopup.close()
     window.visible = false
     closingFromHost = false
   }
@@ -384,6 +429,8 @@ Item {
     if (name === "apply") return "Start"
     if (name === "stop") return "Stop"
     if (name === "revert") return "Revert"
+    if (name === "auto-theme") return "Auto-match"
+    if (name === "undo-auto-theme") return "Undo auto-match"
     if (!name || !name.length) return "Action"
     return name.charAt(0).toUpperCase() + name.slice(1)
   }
@@ -445,11 +492,29 @@ Item {
         statusMessage = verb + " failed (exit " + code + ")"
       }
     }
+    if (actionProc.actionName === "set-wallpaper-dirs") {
+      if (!timedOut && code === 0) {
+        extraWallpaperDirs = wallpaperDirsDraft.slice(0)
+        wallpaperDirsError = ""
+        wallpaperDirsPopup.close()
+        statusMessage = "Wallpaper folders updated"
+      } else {
+        wallpaperDirsError = statusMessage
+      }
+    }
     Qt.callLater(function() { root.refresh() })
   }
 
   function stopEngine() { runWe(["stop"], "Stopping…") }
   function revertTheme() { runWe(["revert"], "Restoring…") }
+  function toggleAutoTheme() {
+    if (autoThemeActive)
+      runWe(["undo-auto-theme"], "Restoring previous theme…")
+    else if (currentHasWallpaper)
+      runWe(["auto-theme", currentMonitor], "Matching theme colors…")
+    else
+      statusMessage = "Pick a wallpaper on this display before auto-matching its theme"
+  }
   function startEngine() {
     if (!canStartEngine) {
       statusMessage = startHint
@@ -517,6 +582,9 @@ Item {
         }
       }
       themeName = root.qmlString(data.theme)
+      autoThemeActive = root.qmlBool(data.autoThemeActive)
+      autoThemePrevious = root.qmlString(data.autoThemePrevious)
+      extraWallpaperDirs = root.qmlStringList(data.extraWallpaperDirs)
       defaults = root.qmlPlain(data.defaults) || ({})
       displays = root.qmlPlain(data.displays) || ({})
       // Live hyprctl-backed monitors → plain objects + parallel string arrays.
@@ -618,7 +686,8 @@ Item {
 
   Timer {
     id: actionWatchdog
-    interval: 60000
+    interval: (actionProc.actionName === "auto-theme"
+      || actionProc.actionName === "undo-auto-theme") ? 120000 : 60000
     repeat: false
     onTriggered: {
       if (actionProc.settled) return
@@ -800,6 +869,21 @@ Item {
                 bordered: true
                 enabled: !actionProc.running && !root.displayBusy && (root.engineRunning || root.active)
                 onClicked: root.stopEngine()
+              }
+
+              Button {
+                text: root.autoThemeActive
+                  ? "Undo theme match"
+                  : "Auto-match theme"
+                iconText: root.autoThemeActive ? "󰕍" : "󰏘"
+                foreground: root.fg
+                accent: Color.accent
+                active: root.autoThemeActive
+                bordered: true
+                Layout.fillWidth: true
+                enabled: !actionProc.running && !root.displayBusy
+                  && (root.autoThemeActive || root.currentHasWallpaper)
+                onClicked: root.toggleAutoTheme()
               }
 
               Button {
@@ -1028,6 +1112,7 @@ Item {
 
                   onRefreshNeeded: root.refresh()
                   onApplied: root.refresh()
+                  onEditWallpaperFoldersRequested: root.openWallpaperFolders()
                   onApplyBusyChanged: function(isBusy) {
                     root.displayBusy = isBusy
                     if (isBusy) {
@@ -1043,6 +1128,191 @@ Item {
                 }
               }
             }
+          }
+        }
+      }
+    }
+
+    Popup {
+      id: wallpaperDirsPopup
+      parent: window.contentItem
+      x: Math.max(Style.space(8), (window.width - width) / 2)
+      y: Math.max(Style.space(8), (window.height - height) / 2)
+      width: Math.min(Style.space(620), window.width - Style.space(32))
+      height: Math.min(Style.space(430), window.height - Style.space(32))
+      padding: Style.space(16)
+      modal: true
+      focus: true
+      closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+      onOpened: Qt.callLater(function() { folderPathField.forceActiveFocus() })
+      onClosed: if (root.opened) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+
+      background: BorderSurface {
+        color: root.bg
+        borderSpec: root.sectionBorderSpec
+        radius: Style.cornerRadius
+      }
+
+      contentItem: ColumnLayout {
+        spacing: Style.space(10)
+
+        RowLayout {
+          Layout.fillWidth: true
+
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: Style.space(2)
+
+            Text {
+              text: "Wallpaper folders"
+              color: root.fg
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+
+            Text {
+              Layout.fillWidth: true
+              text: "Add another Steam library or Workshop content folder. Automatic locations stay enabled."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+          }
+
+          PanelActionButton {
+            iconText: "󰅖"
+            tooltipText: "Close"
+            foreground: root.fg
+            fontFamily: root.fontFamily
+            onClicked: wallpaperDirsPopup.close()
+          }
+        }
+
+        PanelSeparator { Layout.fillWidth: true; foreground: root.fg }
+
+        Text {
+          Layout.fillWidth: true
+          text: "Paste a Steam library folder, steamapps folder, or …/workshop/content/431960."
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+
+        RowLayout {
+          Layout.fillWidth: true
+          spacing: Style.space(8)
+
+          TextField {
+            id: folderPathField
+            Layout.fillWidth: true
+            placeholderText: "/mnt/games/SteamLibrary"
+            foreground: root.fg
+            font.family: root.fontFamily
+            enabled: !actionProc.running
+            onAccepted: root.addWallpaperFolder()
+          }
+
+          Button {
+            text: "Add"
+            iconText: "󰐕"
+            foreground: root.fg
+            bordered: true
+            enabled: !actionProc.running && folderPathField.text.trim().length > 0
+            onClicked: root.addWallpaperFolder()
+          }
+        }
+
+        BorderSurface {
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          color: root.sectionFill
+          borderSpec: root.sectionBorderSpec
+          radius: Style.cornerRadius
+          clip: true
+
+          Text {
+            anchors.centerIn: parent
+            visible: root.wallpaperDirsDraft.length === 0
+            text: "No additional folders"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          ListView {
+            anchors.fill: parent
+            anchors.margins: Style.space(6)
+            visible: root.wallpaperDirsDraft.length > 0
+            model: root.wallpaperDirsDraft
+            spacing: Style.space(4)
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+
+            delegate: RowLayout {
+              required property string modelData
+              required property int index
+              width: ListView.view.width
+              spacing: Style.space(8)
+
+              Text {
+                Layout.fillWidth: true
+                text: modelData
+                color: root.fg
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideMiddle
+              }
+
+              PanelActionButton {
+                iconText: "󰆴"
+                tooltipText: "Remove folder"
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                enabled: !actionProc.running
+                onClicked: root.removeWallpaperFolder(index)
+              }
+            }
+          }
+        }
+
+        Text {
+          Layout.fillWidth: true
+          visible: root.wallpaperDirsError.length > 0
+          text: root.wallpaperDirsError
+          color: "#ef7777"
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+
+        RowLayout {
+          Layout.fillWidth: true
+          spacing: Style.space(8)
+
+          Item { Layout.fillWidth: true }
+
+          Button {
+            text: "Cancel"
+            foreground: root.fg
+            bordered: true
+            enabled: !actionProc.running
+            onClicked: wallpaperDirsPopup.close()
+          }
+
+          Button {
+            text: actionProc.running && actionProc.actionName === "set-wallpaper-dirs"
+              ? "Saving…" : "Save folders"
+            iconText: "󰆓"
+            foreground: root.fg
+            accent: Color.accent
+            active: true
+            bordered: true
+            enabled: !actionProc.running && !root.displayBusy
+            onClicked: root.saveWallpaperFolders()
           }
         }
       }
