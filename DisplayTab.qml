@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls as QQC
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
@@ -53,6 +54,15 @@ Item {
   property bool hasWallpaper: false
   property string actionKind: ""
   property string wallpaperTitleBound: ""
+  /** Monotonic version of user-authored draft changes. Config reads capture
+      this value and may bind only if the draft has not changed meanwhile. */
+  property int draftRevision: 0
+  /** True while the controls contain changes not yet saved by Apply/Clear. */
+  property bool draftDirty: false
+  /** Draft revision captured by the current Apply/Clear transaction. */
+  property int actionDraftRevision: 0
+  /** Coalesce reload requests that arrive while display-config is running. */
+  property bool configReloadPending: false
   /** Remaining argv vectors after the current we step (set-display then apply). */
   property var actionQueue: []
   /** Bumps to cancel stale Qt.callLater starts after timeout / fail. */
@@ -188,6 +198,11 @@ Item {
       root.errorOccurred(msg)
   }
 
+  function markDraftEdited() {
+    draftRevision += 1
+    draftDirty = true
+  }
+
   function reload() {
     if (!displayName || !displayName.length) return
     setStatus("")
@@ -209,7 +224,13 @@ Item {
   }
 
   function loadDisplayConfig() {
-    if (configProc.running) return
+    if (configProc.running) {
+      configReloadPending = true
+      return
+    }
+    configReloadPending = false
+    configProc.draftRevisionAtStart = draftRevision
+    configProc.bindAllowedAtStart = !draftDirty
     // Direct argv only. A login-shell Process on this hot path has previously
     // crashed omarchy-shell and can run arbitrary shell startup work.
     configProc.command = [resolvedWeBin, "display-config", displayName, "--json"]
@@ -277,6 +298,7 @@ Item {
     var keys = Object.keys(properties || ({}))
     for (var i = 0; i < keys.length; i++) next[keys[i]] = properties[keys[i]]
     next[k] = String(value)
+    markDraftEdited()
     properties = next
   }
 
@@ -418,6 +440,11 @@ Item {
 
   function applySettings() {
     if (actionsBlocked || actionProc.running) return
+    if (!draftDirty && configProc.running
+        && configProc.draftRevisionAtStart === draftRevision) {
+      setError("Wait for display settings to load")
+      return
+    }
     if (!displayName || !displayName.length) {
       setError("No display selected")
       return
@@ -430,6 +457,7 @@ Item {
       setError("Wait for wallpaper properties to load")
       return
     }
+    actionDraftRevision = draftRevision
     startWeChain(
       [buildSetDisplayArgv(), [resolvedWeBin, "apply", displayName]],
       "apply",
@@ -439,6 +467,7 @@ Item {
   function clearDisplay() {
     if (actionsBlocked || actionProc.running) return
     if (!displayName || !displayName.length) return
+    actionDraftRevision = draftRevision
     startWeChain(
       [
         [resolvedWeBin, "set-display", displayName, "--clear"],
@@ -599,15 +628,26 @@ Item {
 
   Process {
     id: configProc
+    property int draftRevisionAtStart: 0
+    property bool bindAllowedAtStart: true
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.parseConfigPayload(text)
+      onStreamFinished: {
+        // A late response must never replace a wallpaper or setting selected
+        // after this display-config request started.
+        if (!configProc.bindAllowedAtStart || root.draftDirty
+            || configProc.draftRevisionAtStart !== root.draftRevision)
+          return
+        root.parseConfigPayload(text)
+      }
     }
     onExited: function(code) {
       configWatchdog.stop()
       root.loadFinished()
       if (code !== 0 && root.tabActive)
         root.setError("Could not read display config")
+      if (root.configReloadPending)
+        Qt.callLater(root.loadDisplayConfig)
     }
   }
 
@@ -711,6 +751,9 @@ Item {
           var err = actionProc.lastStderr
           actionProc.lastStderr = ""
           if (exitCode === 0) {
+            if ((kind === "apply" || kind === "clear")
+                && root.actionDraftRevision === root.draftRevision)
+              root.draftDirty = false
             if (kind === "apply")
               root.setStatus(root.engineRunning
                 ? ("Applied to " + root.displayName)
@@ -867,6 +910,9 @@ Item {
           spacing: Style.space(4)
           model: root.filteredWallpapers
           boundsBehavior: Flickable.StopAtBounds
+          QQC.ScrollBar.vertical: QQC.ScrollBar {
+            policy: QQC.ScrollBar.AsNeeded
+          }
 
           delegate: BorderSurface {
             required property var modelData
@@ -944,6 +990,7 @@ Item {
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onClicked: {
+                root.markDraftEdited()
                 root.selectedWallpaperId = String(modelData.id)
                 root.wallpaperTitleBound = String(modelData.title || "")
               }
@@ -979,7 +1026,11 @@ Item {
           foreground: root.fg
           fontFamily: root.fontFamily
           enabled: !root.actionsBlocked && !configProc.running && !listProc.running
-          onClicked: root.reload()
+          onClicked: {
+            // An explicit reload intentionally discards the current draft.
+            root.draftDirty = false
+            root.reload()
+          }
         }
       }
 
@@ -992,6 +1043,9 @@ Item {
         contentHeight: settingsColumn.implicitHeight
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
+        QQC.ScrollBar.vertical: QQC.ScrollBar {
+          policy: QQC.ScrollBar.AsNeeded
+        }
 
         ColumnLayout {
           id: settingsColumn
@@ -1129,7 +1183,10 @@ Item {
                 value: root.scaling
                 options: root.scalingOptions
                 foreground: root.fg
-                onChanged: function(v) { root.scaling = v }
+                onChanged: function(v) {
+                  root.markDraftEdited()
+                  root.scaling = v
+                }
               }
 
               NumberField {
@@ -1139,7 +1196,10 @@ Item {
                 from: 1
                 to: 240
                 foreground: root.fg
-                onModified: function(v) { root.fps = v }
+                onModified: function(v) {
+                  root.markDraftEdited()
+                  root.fps = v
+                }
               }
 
               Dropdown {
@@ -1148,7 +1208,10 @@ Item {
                 value: root.clampMode
                 options: root.clampOptions
                 foreground: root.fg
-                onChanged: function(v) { root.clampMode = v }
+                onChanged: function(v) {
+                  root.markDraftEdited()
+                  root.clampMode = v
+                }
               }
 
               Dropdown {
@@ -1157,7 +1220,10 @@ Item {
                 value: root.engineLayer
                 options: root.layerOptions
                 foreground: root.fg
-                onChanged: function(v) { root.engineLayer = v }
+                onChanged: function(v) {
+                  root.markDraftEdited()
+                  root.engineLayer = v
+                }
               }
 
               Text {
@@ -1211,7 +1277,10 @@ Item {
                 description: "Uses --silent. Unmute to set --volume."
                 checked: root.silent
                 foreground: root.fg
-                onClicked: root.silent = !root.silent
+                onClicked: {
+                  root.markDraftEdited()
+                  root.silent = !root.silent
+                }
               }
 
               NumberField {
@@ -1221,7 +1290,10 @@ Item {
                 from: 0
                 to: 100
                 foreground: root.fg
-                onModified: function(v) { root.volume = v }
+                onModified: function(v) {
+                  root.markDraftEdited()
+                  root.volume = v
+                }
               }
 
               Toggle {
@@ -1230,7 +1302,10 @@ Item {
                 description: "Keep wallpaper audio when other apps play sound (--noautomute)."
                 checked: root.noautomute
                 foreground: root.fg
-                onClicked: root.noautomute = !root.noautomute
+                onClicked: {
+                  root.markDraftEdited()
+                  root.noautomute = !root.noautomute
+                }
               }
 
               Toggle {
@@ -1239,7 +1314,10 @@ Item {
                 description: "Turns off audio-reactive wallpaper features (--no-audio-processing)."
                 checked: root.noAudioProcessing
                 foreground: root.fg
-                onClicked: root.noAudioProcessing = !root.noAudioProcessing
+                onClicked: {
+                  root.markDraftEdited()
+                  root.noAudioProcessing = !root.noAudioProcessing
+                }
               }
             }
           }
@@ -1381,7 +1459,9 @@ Item {
                       text: root.propValueFor(modelData.key, modelData.value)
                       foreground: root.fg
                       font.family: root.fontFamily
-                      onEditingFinished: root.setPropValue(modelData.key, text)
+                      // Commit on every user edit. Apply buttons are not
+                      // focusable, so focus loss is not a reliable commit.
+                      onTextEdited: root.setPropValue(modelData.key, text)
                     }
                   }
                 }
@@ -1418,7 +1498,10 @@ Item {
                 description: "Do not pause this display's wallpaper for fullscreen apps."
                 checked: root.noFullscreenPause
                 foreground: root.fg
-                onClicked: root.noFullscreenPause = !root.noFullscreenPause
+                onClicked: {
+                  root.markDraftEdited()
+                  root.noFullscreenPause = !root.noFullscreenPause
+                }
               }
 
               Toggle {
@@ -1428,7 +1511,10 @@ Item {
                 description: "Wayland-only. Ignores fullscreen windows that are not active."
                 checked: root.fullscreenPauseOnlyActive
                 foreground: root.fg
-                onClicked: root.fullscreenPauseOnlyActive = !root.fullscreenPauseOnlyActive
+                onClicked: {
+                  root.markDraftEdited()
+                  root.fullscreenPauseOnlyActive = !root.fullscreenPauseOnlyActive
+                }
               }
 
               ColumnLayout {
@@ -1449,7 +1535,10 @@ Item {
                   text: root.fullscreenPauseIgnoreAppIds
                   foreground: root.fg
                   font.family: root.fontFamily
-                  onTextChanged: root.fullscreenPauseIgnoreAppIds = text
+                  onTextEdited: {
+                    root.markDraftEdited()
+                    root.fullscreenPauseIgnoreAppIds = text
+                  }
                 }
               }
 
@@ -1459,7 +1548,10 @@ Item {
                 description: "Skips scene particle systems (--disable-particles)."
                 checked: root.disableParticles
                 foreground: root.fg
-                onClicked: root.disableParticles = !root.disableParticles
+                onClicked: {
+                  root.markDraftEdited()
+                  root.disableParticles = !root.disableParticles
+                }
               }
 
               Toggle {
@@ -1470,7 +1562,10 @@ Item {
                   : "Available even though this wallpaper does not advertise mouse support."
                 checked: root.disableMouse
                 foreground: root.fg
-                onClicked: root.disableMouse = !root.disableMouse
+                onClicked: {
+                  root.markDraftEdited()
+                  root.disableMouse = !root.disableMouse
+                }
               }
 
               Toggle {
@@ -1481,7 +1576,10 @@ Item {
                   : "Available even though this wallpaper does not advertise parallax support."
                 checked: root.disableParallax
                 foreground: root.fg
-                onClicked: root.disableParallax = !root.disableParallax
+                onClicked: {
+                  root.markDraftEdited()
+                  root.disableParallax = !root.disableParallax
+                }
               }
 
               Text {
@@ -1560,6 +1658,8 @@ Item {
                   bordered: true
                   enabled: !root.actionsBlocked && root.displayName.length > 0
                     && root.wallpaperSelected && !root.capsLoading
+                    && (root.draftDirty || !configProc.running
+                      || configProc.draftRevisionAtStart !== root.draftRevision)
                   Layout.fillWidth: true
                   onClicked: root.applySettings()
                 }

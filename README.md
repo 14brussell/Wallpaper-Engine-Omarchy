@@ -121,7 +121,9 @@ On **Apply** for one tab:
 
 `we apply` without monitor arguments attempts every configured display independently. One failure is reported, but successfully started displays remain running. `we revert` stops all plugin-owned display processes and directly restores the saved/current theme background.
 
-Readiness env vars (optional): `WE_LWE_READY_MS` bounds first-frame validation, `WE_LWE_SCREENSHOT_DELAY` controls how many engine frames precede the framebuffer dump, and `WE_LWE_PAINT_EPS` controls uniform-clear detection.
+Readiness env vars (optional): `WE_LWE_READY_MS` bounds first-frame validation (15 seconds by default so large Scene packages can finish loading), `WE_LWE_SCREENSHOT_DELAY` controls how many engine frames precede the framebuffer dump, and `WE_LWE_PAINT_EPS` controls uniform-clear detection. The wait still ends immediately if the replacement engine exits.
+
+If a Scene process exits before its first frame, Apply retries once with `--disable-particles`. A successful retry persists `disable_particles=true` for that display and reports the compatibility fallback; an unsuccessful retry restores the prior setting and leaves the previous wallpaper running.
 
 ### Hooks
 

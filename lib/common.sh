@@ -843,7 +843,8 @@ we_save_theme_background_if_needed() {
 # WE_BG_REVEAL_MS is the QML animation duration. Overlay waits Image.Ready
 # before starting the wipe. WE_BG_LAYER_WAIT_MS polls for the LWE bottom layer.
 # WE_LWE_READY_MS is the max wait for a structured FBO (not a hide-anyway pad).
-# LWE cannot present without a black clear; there is no ready IPC.
+# Large Scene packages can spend several seconds loading assets and compiling
+# shaders before the delayed screenshot is written. LWE has no ready IPC.
 # WE_BG_CANVAS_WAIT_MS covers pre-map grim/ffmpeg still generation only.
 WE_BG_REVEAL_MS="${WE_BG_REVEAL_MS:-420}"
 WE_BG_REVEAL_LOAD_MS="${WE_BG_REVEAL_LOAD_MS:-160}"
@@ -854,7 +855,7 @@ WE_BG_CANVAS_WAIT_MS="${WE_BG_CANVAS_WAIT_MS:-8000}"
 WE_BG_OVERLAY_COVER_MS="${WE_BG_OVERLAY_COVER_MS:-2500}"
 WE_BG_OVERLAY_DONE_MS="${WE_BG_OVERLAY_DONE_MS:-2500}"
 WE_BG_LAYER_WAIT_MS="${WE_BG_LAYER_WAIT_MS:-1500}"
-WE_LWE_READY_MS="${WE_LWE_READY_MS:-3000}"
+WE_LWE_READY_MS="${WE_LWE_READY_MS:-15000}"
 WE_LWE_SCREENSHOT="${WE_LWE_SCREENSHOT:-$WE_STATE_DIR/lwe-ready.jpg}"
 # Empty = 1s of frames, clamped 30–45. First LWE frames are a black clear.
 WE_LWE_SCREENSHOT_DELAY="${WE_LWE_SCREENSHOT_DELAY:-}"
@@ -1213,8 +1214,10 @@ we_lwe_fbo_painted() {
 # Overlay still shows TO. hyprctl map/alpha is not a paint signal.
 # Poll the FBO screenshot until it exists AND has structure. Return 1 at
 # WE_LWE_READY_MS without treating that as "hide anyway" — caller keeps cover.
+# Optional PID/starttime arguments let callers fail immediately if LWE exits.
 we_wait_engine_first_paint() {
   local timeout=${1:-$WE_LWE_READY_MS}
+  local engine_pid=${2:-} engine_start=${3:-}
   local start now
   start=$(we_now_ms)
   we_transition_log "polling LWE FBO $WE_LWE_SCREENSHOT (max ${timeout}ms; hide only when structured)"
@@ -1222,6 +1225,11 @@ we_wait_engine_first_paint() {
     if we_lwe_fbo_painted; then
       we_transition_log "LWE FBO painted"
       return 0
+    fi
+    if [[ -n $engine_pid && -n $engine_start ]] \
+      && ! we_is_engine_pid "$engine_pid" "$engine_start"; then
+      we_transition_log "LWE exited before producing a painted FBO"
+      return 1
     fi
     now=$(we_now_ms)
     if (( now - start >= timeout )); then
@@ -2605,6 +2613,7 @@ we_restore_non_placeholder_background() {
 we_start_engine_monitor() {
   local monitor=$1 wallpaper resolved key pid_file log_file old_identity
   local screenshot engine_pid engine_start pid_ready=false pid_tmp i
+  local project_type particles_disabled painted=true engine_alive=true
   local -a args=() env_prefix=()
 
   wallpaper=$(we_display_wallpaper "$monitor")
@@ -2617,6 +2626,8 @@ we_start_engine_monitor() {
     echo "Display $monitor uses unsupported wallpaper $wallpaper (missing/unsupported project type)." >&2
     return 1
   fi
+  project_type=$(jq -r '(.type // "") | ascii_downcase' "$resolved/project.json" 2>/dev/null || true)
+  particles_disabled=$(we_effective_display_json "$monitor" | jq -r '.disableParticles // false')
 
   key=$(we_monitor_key "$monitor")
   pid_file=$(we_monitor_pid_file "$monitor")
@@ -2658,9 +2669,28 @@ we_start_engine_monitor() {
     return 1
   fi
 
-  if ! we_wait_engine_first_paint "$WE_LWE_READY_MS" \
-    || ! we_is_engine_pid "$engine_pid" "$engine_start"; then
+  we_wait_engine_first_paint "$WE_LWE_READY_MS" "$engine_pid" "$engine_start" || painted=false
+  we_is_engine_pid "$engine_pid" "$engine_start" || engine_alive=false
+  if ! $painted || ! $engine_alive; then
     we_terminate_identity "$engine_pid $engine_start"
+
+    # Some older Scene projects trigger an upstream linux-wallpaperengine
+    # crash while constructing a particle object. Retry a process that exited
+    # before first paint once with particles disabled. Persist the setting only
+    # when that compatibility attempt renders successfully, so later applies
+    # do not generate another core dump for the same wallpaper.
+    if ! $engine_alive && [[ $project_type == scene ]] \
+      && [[ $particles_disabled != true && $particles_disabled != True ]]; then
+      we_runtime_log "display $monitor engine exited before first paint; retrying wallpaper=$wallpaper with particles disabled"
+      we_jq_write --arg m "$monitor" '.displays[$m].disable_particles = true'
+      if we_start_engine_monitor "$monitor"; then
+        we_runtime_log "display $monitor compatibility fallback active: particles disabled"
+        we_notify "Wallpaper Engine: particles disabled for compatibility on $monitor"
+        return 0
+      fi
+      we_jq_write --arg m "$monitor" '.displays[$m].disable_particles = false'
+    fi
+
     echo "Wallpaper $wallpaper failed to render on $monitor; see $log_file" >&2
     return 1
   fi
