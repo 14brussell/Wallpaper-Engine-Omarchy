@@ -8,7 +8,7 @@ It ships a **Quickshell GUI** (`FloatingWindow`, one tab per Hyprland output), a
 
 <p align="center">
   <a href="assets/wallpaper-engine-for-omarchy-demo.mp4">
-    <img src="preview.png" alt="Watch the Wallpaper Engine for Omarchy demo" width="100%">
+    <img src="preview.png?v=06ba01c" alt="Watch the Wallpaper Engine for Omarchy demo" width="100%">
   </a>
   <br>
   <a href="assets/wallpaper-engine-for-omarchy-demo.mp4"><strong>▶ Watch the 11-second demo (MP4)</strong></a>
