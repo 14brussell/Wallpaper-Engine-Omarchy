@@ -20,14 +20,14 @@ mkdir -p "$HOME"
 source "$ROOT/lib/common.sh"
 
 test_complete_clear_screenshot_fails_fast() {
-  local screenshot="$TEST_ROOT/clear.png"
+  local screenshot="$TEST_ROOT/clear.jpg"
   local started elapsed timeout_ms=1000
 
   python3 - "$screenshot" <<'PY'
 import sys
 from PIL import Image
 
-Image.new("RGB", (32, 32), "black").save(sys.argv[1])
+Image.new("RGB", (32, 32), "black").save(sys.argv[1], quality=95)
 PY
 
   we_file_is_image "$screenshot" \

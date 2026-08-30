@@ -417,6 +417,16 @@ def best_still(directory: str, allow_preview: bool = False) -> str | None:
     return None
 
 
+def _stat_fingerprint(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
 def fbo_paint_state(path: str, epsilon: int = 8) -> str:
     """Classify an LWE FBO dump as painted, clear, or incomplete.
 
@@ -429,11 +439,6 @@ def fbo_paint_state(path: str, epsilon: int = 8) -> str:
     if not path or not os.path.isfile(path):
         return "incomplete"
     try:
-        if os.path.getsize(path) < 32:
-            return "incomplete"
-    except OSError:
-        return "incomplete"
-    try:
         eps = max(0, int(epsilon))
     except (TypeError, ValueError):
         eps = 8
@@ -441,11 +446,23 @@ def fbo_paint_state(path: str, epsilon: int = 8) -> str:
         from PIL import Image, ImageStat
 
         try:
-            with Image.open(path) as im:
-                im = im.convert("RGB")
-                im.thumbnail((128, 128))
-                st = ImageStat.Stat(im)
+            with open(path, "rb") as source:
+                before = os.fstat(source.fileno())
+                if before.st_size < 32:
+                    return "incomplete"
+                with Image.open(source) as im:
+                    image_format = (im.format or "").upper()
+                    im = im.convert("RGB")
+                    im.thumbnail((128, 128))
+                    st = ImageStat.Stat(im)
+                if image_format == "JPEG":
+                    source.seek(-2, os.SEEK_END)
+                    if source.read(2) != b"\xff\xd9":
+                        return "incomplete"
+                after = os.fstat(source.fileno())
         except Exception:
+            return "incomplete"
+        if _stat_fingerprint(before) != _stat_fingerprint(after):
             return "incomplete"
         mx = max(ch[1] for ch in st.extrema)
         mn = min(ch[0] for ch in st.extrema)
@@ -456,11 +473,23 @@ def fbo_paint_state(path: str, epsilon: int = 8) -> str:
     if not identify:
         return "incomplete"
     try:
-        out = subprocess.check_output(
+        before = os.stat(path)
+        if before.st_size < 32:
+            return "incomplete"
+        result = subprocess.run(
             [identify, "-format", "%[fx:maxima] %[fx:standard_deviation]\\n", path],
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
             text=True,
-        ).strip().split()
+            check=False,
+        )
+        # ImageMagick may return zero and computed statistics for a truncated
+        # JPEG while reporting the premature end only as a warning.
+        if result.returncode != 0 or result.stderr.strip():
+            return "incomplete"
+        after = os.stat(path)
+        if _stat_fingerprint(before) != _stat_fingerprint(after):
+            return "incomplete"
+        out = result.stdout.strip().split()
         if len(out) < 2:
             return "incomplete"
         maxima = float(out[0])
