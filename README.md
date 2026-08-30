@@ -1,7 +1,7 @@
 # Wallpaper Engine for Omarchy
 
 <p align="center">
-  <img src="preview.png?v=06ba01c" alt="Wallpaper Engine for Omarchy interface" width="100%">
+  <img src="preview.png?v=699ba2f" alt="Wallpaper Engine for Omarchy interface" width="100%">
 </p>
 
 Omarchy shell plugin that plays [Steam Wallpaper Engine](https://store.steampowered.com/app/431960/) scenes on Hyprland through [Almamu/linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine).
