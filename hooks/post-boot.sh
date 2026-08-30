@@ -49,11 +49,17 @@ POST_BOOT_LOG="$WE_STATE_DIR/post-boot.log"
 # inherit its advisory-lock descriptors. Keep a setsid fallback for minimal
 # sessions where the user systemd manager is unavailable. fd 9 is explicitly
 # closed because it is the plugin transition lock's documented descriptor.
+#
+# Default KillMode=control-group SIGTERMs leftover cgroup members when the
+# transient unit's main process (we apply) exits. linux-wallpaperengine is
+# nohup'd on purpose so it outlives apply; KillMode=process is required so
+# restore does not kill the engines it just started.
 unit="wallpaper-engine-restore-${PPID}-$$"
 if command -v systemd-run >/dev/null 2>&1 \
     && systemd-run --user --collect --quiet --unit="$unit" \
       --property="StandardOutput=append:$POST_BOOT_LOG" \
       --property="StandardError=append:$POST_BOOT_LOG" \
+      --property=KillMode=process \
       env WE_PRESERVE_LAST_APPLIED=1 \
         WE_POST_BOOT_APPLY_BIN="$WE_POST_BOOT_APPLY_BIN" \
         "$HOOK_PATH" --restore 9>&-; then
