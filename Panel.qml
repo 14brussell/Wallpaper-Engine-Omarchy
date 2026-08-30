@@ -40,6 +40,11 @@ Item {
   property string autoThemePrevious: ""
   property string autoThemeSourceMonitor: ""
   property string lastAppliedMonitor: ""
+  property var workshopWallpapers: []
+  property string workshopFilterText: ""
+  property bool workshopLoading: false
+  property bool workshopLoaded: false
+  property bool workshopReloadPending: false
   property var extraWallpaperDirs: []
   property var wallpaperDirsDraft: []
   property string wallpaperDirsError: ""
@@ -368,6 +373,38 @@ Item {
     runWe(["set-wallpaper-dirs"].concat(wallpaperDirsDraft), "Saving wallpaper folders…")
   }
 
+  // The Workshop catalog is shared by every display tab. Cache it until the
+  // user changes wallpaper folders so tab switches only reload display config.
+  function loadWorkshopWallpapers(force) {
+    if (workshopProc.running) {
+      if (force) workshopReloadPending = true
+      return
+    }
+    if (!force && workshopLoaded) return
+    workshopReloadPending = false
+    workshopLoading = true
+    workshopProc.command = [weBin, "list", "--json"]
+    workshopWatchdog.restart()
+    try {
+      workshopProc.running = true
+    } catch (e) {
+      workshopWatchdog.stop()
+      workshopLoading = false
+      statusMessage = "Could not list wallpapers"
+    }
+  }
+
+  function parseWorkshopWallpapers(raw) {
+    try {
+      var data = JSON.parse(String(raw || "[]"))
+      if (!Array.isArray(data)) throw new Error("Invalid wallpaper list")
+      workshopWallpapers = data
+      workshopLoaded = true
+    } catch (e) {
+      statusMessage = "Could not list wallpapers"
+    }
+  }
+
   function open(payloadJson) {
     // Never summon another shell surface from this panel. Host summon already
     // delivered us here, and wallpaper lifecycle stays in the backend.
@@ -378,6 +415,7 @@ Item {
       selectTab(0, true)
       window.visible = true
       refresh()
+      loadWorkshopWallpapers(false)
       Qt.callLater(function() {
         if (!opened) return
         try {
@@ -502,6 +540,7 @@ Item {
         wallpaperDirsError = ""
         wallpaperDirsPopup.close()
         statusMessage = "Wallpaper folders updated"
+        Qt.callLater(function() { root.loadWorkshopWallpapers(true) })
       } else {
         wallpaperDirsError = statusMessage
       }
@@ -511,7 +550,9 @@ Item {
 
   function revertTheme() { runWe(["revert"], "Restoring…") }
   function toggleAutoTheme() {
-    if (autoThemeActive)
+    if (!engineRunning)
+      statusMessage = "Start a wallpaper before auto-matching its theme"
+    else if (autoThemeActive)
       runWe(["undo-auto-theme"], "Restoring previous theme…")
     else if (lastAppliedMonitor.length)
       runWe(["auto-theme"], "Matching the most recently applied wallpaper…")
@@ -629,6 +670,39 @@ Item {
       if (root.statusMessage === "Status timed out") return
       if (!root.statusMessage.length)
         root.statusMessage = "Could not read status"
+    }
+  }
+
+  Process {
+    id: workshopProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        workshopWatchdog.stop()
+        root.workshopLoading = false
+        root.parseWorkshopWallpapers(text)
+      }
+    }
+    onExited: function(code) {
+      workshopWatchdog.stop()
+      root.workshopLoading = false
+      if (code !== 0 && root.opened)
+        root.statusMessage = "Could not list wallpapers"
+      if (root.workshopReloadPending)
+        Qt.callLater(function() { root.loadWorkshopWallpapers(true) })
+    }
+  }
+
+  Timer {
+    id: workshopWatchdog
+    interval: 10000
+    repeat: false
+    onTriggered: {
+      if (!workshopProc.running) return
+      try { workshopProc.running = false } catch (e) {}
+      root.workshopLoading = false
+      if (root.opened)
+        root.statusMessage = "Wallpaper scan timed out"
     }
   }
 
@@ -858,6 +932,7 @@ Item {
                 bordered: true
                 Layout.fillWidth: true
                 enabled: !actionProc.running && !root.displayBusy
+                  && root.engineRunning
                   && (root.autoThemeActive || root.autoThemeHasSource)
                 onClicked: root.toggleAutoTheme()
               }
@@ -1113,9 +1188,15 @@ Item {
                   tabActive: index === root.currentTabIndex && root.currentTabIndex >= 0
                   panelBusy: actionProc.running || root.displayBusy
                   engineRunning: root.displayEngineRunning(displayTab.displayName)
+                  wallpapers: root.workshopWallpapers
+                  filterText: root.workshopFilterText
+                  loading: root.workshopLoading
 
                   onRefreshNeeded: root.refresh()
                   onApplied: root.refresh()
+                  onFilterTextEdited: function(text) {
+                    root.workshopFilterText = text
+                  }
                   onEditWallpaperFoldersRequested: root.openWallpaperFolders()
                   onActionBusyChanged: function(isBusy, actionKind) {
                     root.displayBusy = isBusy

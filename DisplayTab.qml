@@ -25,7 +25,8 @@ import qs.Ui
 // Panel contract:
 //   property string displayName / weBin / pluginRoot
 //   function reload()
-//   signal applied() / refreshNeeded() / statusMessage(string)
+//   signal applied() / refreshNeeded() / filterTextEdited(string)
+//          / statusMessage(string)
 Item {
   id: root
 
@@ -42,12 +43,14 @@ Item {
   signal applied()
   signal refreshNeeded()
   signal editWallpaperFoldersRequested()
+  signal filterTextEdited(string text)
   signal statusMessage(string text)
   signal loadFinished()
   signal errorOccurred(string message)
   signal actionBusyChanged(bool busy, string actionKind)
 
   // ---- Internal status -------------------------------------------------
+  /** Shared Workshop catalog state supplied by Panel. */
   property bool loading: false
   property bool capsLoading: false
   property bool busy: false
@@ -237,7 +240,6 @@ Item {
     saveApplyStatus = ""
     setStatus("")
     loadDisplayConfig()
-    loadWallpapers()
   }
 
   onDisplayNameChanged: {
@@ -270,20 +272,6 @@ Item {
     } catch (e) {
       configWatchdog.stop()
       setError("Could not read display config")
-    }
-  }
-
-  function loadWallpapers() {
-    if (listProc.running) return
-    loading = true
-    listProc.command = [resolvedWeBin, "list", "--json"]
-    listWatchdog.restart()
-    try {
-      listProc.running = true
-    } catch (e) {
-      listWatchdog.stop()
-      loading = false
-      setError("Could not list wallpapers")
     }
   }
 
@@ -654,15 +642,6 @@ Item {
     }
   }
 
-  function parseList(raw) {
-    try {
-      wallpapers = JSON.parse(String(raw || "[]")) || []
-    } catch (e) {
-      wallpapers = []
-      setError("Could not list wallpapers")
-    }
-  }
-
   function parseCapabilities(raw) {
     capsLoading = false
     try {
@@ -719,22 +698,6 @@ Item {
       if (root.configReloadPending)
         Qt.callLater(root.loadDisplayConfig)
       root.continueQueuedApply()
-    }
-  }
-
-  Process {
-    id: listProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        listWatchdog.stop()
-        root.loading = false
-        root.parseList(text)
-      }
-    }
-    onExited: {
-      listWatchdog.stop()
-      root.loading = false
     }
   }
 
@@ -900,18 +863,6 @@ Item {
   }
 
   Timer {
-    id: listWatchdog
-    interval: 10000
-    repeat: false
-    onTriggered: {
-      if (!listProc.running) return
-      try { listProc.running = false } catch (e) {}
-      root.loading = false
-      root.setError("Wallpaper scan timed out")
-    }
-  }
-
-  Timer {
     id: capsWatchdog
     interval: 8000
     repeat: false
@@ -1069,7 +1020,7 @@ Item {
             foreground: root.fg
             fontFamily: root.fontFamily
             bordered: true
-            enabled: !root.actionsBlocked && !listProc.running
+            enabled: !root.actionsBlocked && !root.loading
             onClicked: root.editWallpaperFoldersRequested()
           }
         }
@@ -1080,7 +1031,7 @@ Item {
           text: root.filterText
           foreground: root.fg
           font.family: root.fontFamily
-          onTextChanged: root.filterText = text
+          onTextEdited: root.filterTextEdited(text)
         }
 
         Text {
@@ -1248,7 +1199,7 @@ Item {
           tooltipText: "Reload this display"
           foreground: root.fg
           fontFamily: root.fontFamily
-          enabled: !root.actionsBlocked && !configProc.running && !listProc.running
+          enabled: !root.actionsBlocked && !configProc.running
           onClicked: {
             // An explicit reload intentionally discards the current draft.
             root.draftDirty = false

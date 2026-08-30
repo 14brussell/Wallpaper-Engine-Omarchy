@@ -136,6 +136,12 @@ test_auto_match_hint_is_concise() {
     || fail 'auto-match is not gated on a successfully applied wallpaper'
   ! grep -Fq 'else if (currentHasWallpaper)' "$ROOT/Panel.qml" \
     || fail 'auto-match still accepts a merely configured wallpaper'
+  grep -A16 -F 'id: autoThemeButton' "$ROOT/Panel.qml" \
+    | grep -Fq '&& root.engineRunning' \
+    || fail 'auto-match remains enabled while Wallpaper Engine is stopped'
+  grep -A5 -F 'function toggleAutoTheme()' "$ROOT/Panel.qml" \
+    | grep -Fq 'if (!engineRunning)' \
+    || fail 'auto-match action does not reject stale clicks while the engine is stopped'
 }
 
 test_save_apply_status_stays_in_button() {
@@ -170,6 +176,23 @@ test_workshop_heading_is_visibly_bold() {
   grep -A6 -F 'text: "WORKSHOP WALLPAPERS"' "$ROOT/DisplayTab.qml" \
     | grep -Fq 'font.weight: Font.Black' \
     || fail 'Workshop wallpapers heading does not use a visibly bold weight'
+}
+
+test_workshop_catalog_persists_across_display_tabs() {
+  grep -Fq 'property var workshopWallpapers: []' "$ROOT/Panel.qml" \
+    || fail 'panel does not own the shared Workshop wallpaper catalog'
+  grep -Fq 'property string workshopFilterText: ""' "$ROOT/Panel.qml" \
+    || fail 'panel does not own the cross-display Workshop filter'
+  grep -Fq 'wallpapers: root.workshopWallpapers' "$ROOT/Panel.qml" \
+    || fail 'display tabs do not receive the shared Workshop catalog'
+  grep -Fq 'filterText: root.workshopFilterText' "$ROOT/Panel.qml" \
+    || fail 'display tabs do not receive the shared Workshop filter'
+  grep -Fq 'onTextEdited: root.filterTextEdited(text)' "$ROOT/DisplayTab.qml" \
+    || fail 'Workshop search edits are not forwarded to the shared filter'
+  ! grep -Fq 'id: listProc' "$ROOT/DisplayTab.qml" \
+    || fail 'each display tab still owns a Workshop directory scan process'
+  ! grep -Fq 'loadWallpapers()' "$ROOT/DisplayTab.qml" \
+    || fail 'display reload still rescans the Workshop directory'
 }
 
 test_legacy_preflight() {
@@ -301,6 +324,7 @@ test_auto_match_hint_is_concise
 test_save_apply_status_stays_in_button
 test_save_controls_stay_outside_settings_scroll
 test_workshop_heading_is_visibly_bold
+test_workshop_catalog_persists_across_display_tabs
 test_legacy_preflight
 test_uninstall_preserves_data
 test_uninstall_purges_data
