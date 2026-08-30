@@ -56,10 +56,6 @@ Panel missing: `omarchy-shell shell rescanPlugins`
 
 ### Update
 
-`omarchy plugin add` and `omarchy plugin update` **never invoke** `install.sh`. After every update, run it again.
-
-Git checkout (`…/io.github.14brussell.wallpaper-engine/.git` — the normal `plugin add` path):
-
 ```bash
 omarchy plugin update io.github.14brussell.wallpaper-engine
 ~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/install.sh
