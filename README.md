@@ -10,30 +10,35 @@ https://github.com/user-attachments/assets/8a745361-9db8-40a0-b371-2725e26a6d5e
 
 ## Requirements
 
-- [linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) — AUR `linux-wallpaperengine-git`. **`install.sh` does not install it.**
-- Steam Workshop content with `project.json` (`scene`, `video`, or `web`). Steam does not need to be running.
-- `jq`, `python3`, `hyprctl`
-- Omarchy CLI: `omarchy-theme-bg-set`, `omarchy-shell`
-- `~/.local/bin` on `PATH` (installer links `omarchy-we` and `we-omarchy` there)
+This plugin is not an AUR package.
+
+**Required** (before `omarchy-we apply`):
+
+- [linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) — AUR. **`install.sh` does not install it.**
 
 ```bash
 omarchy pkg aur add linux-wallpaperengine-git
 ```
 
+- Steam + Wallpaper Engine Workshop items with `project.json` (`scene`, `video`, or `web`). Steam does not need to be running. Extra disks: panel folder button or `omarchy-we set-wallpaper-dirs`.
+
+```bash
+omarchy install gaming steam
+```
+
 **Optional:**
 
-- `python-pillow` — **required for auto-match only** (ImageMagick can still compose stills). Not required to apply a wallpaper.
-- `gum` and `omarchy-launch-tui` — advanced TUI only
-- `grim` / `ffmpeg` — stills and video frames; the engine FBO path does not need them
-- `socat` — Hyprland socket events; without it, monitor-watch polls
+- `python-pillow` — auto-match theme only (ImageMagick can still compose stills). Not needed to apply a wallpaper.
 
-**Workshop roots** (every existing path is used, plus extras): `~/.steam`, `~/.local/share/Steam`, Flatpak `com.valvesoftware.Steam`, Snap Steam — each `steamapps/workshop/content/431960`. Extra disks: panel folder button or `omarchy-we set-wallpaper-dirs`.
+```bash
+omarchy pkg add python-pillow
+```
 
 **Paths:** plugins, config, hooks, and themes live under `~/.config/omarchy`. Runtime state is `~/.local/state/omarchy`. `XDG_CONFIG_HOME` / `XDG_STATE_HOME` are ignored. Install as a **real directory** named `io.github.14brussell.wallpaper-engine`. Do **not** symlink a mixed-case checkout (QML rejects the path).
 
 **Layer:** leave `omarchy.background` enabled. The engine is forced to `--layer bottom`.
 
-`install.sh` ends with `omarchy-we doctor || true`. Treat a missing **engine**, **jq**, **hyprctl**, **python3**, or **omarchy-theme-bg-set** as a broken setup. `gum` / `grim` / `ffmpeg` may show missing and still be optional.
+`install.sh` ends with `omarchy-we doctor || true`. A missing **engine** is a broken setup. `python-pillow` may show missing and still be optional.
 
 ## Install
 
