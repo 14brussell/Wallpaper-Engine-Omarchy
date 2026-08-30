@@ -20,7 +20,7 @@ This plugin is not an AUR package.
 omarchy pkg aur add linux-wallpaperengine-git
 ```
 
-- Steam + Wallpaper Engine Workshop items with `project.json` (`scene`, `video`, or `web`). Steam does not need to be running. Extra disks: panel folder button or `omarchy-we set-wallpaper-dirs`.
+- Steam + Wallpaper Engine Workshop items with `project.json` (`scene`, `video`, or `web`). Steam does not need to be running. 
 
 ```bash
 omarchy install gaming steam
