@@ -9,6 +9,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/lib/common.sh"
 WE="$ROOT/bin/we"
 
+WALLPAPER_CATALOG_LOADED=false
+PICKED_MONITOR=""
+PICKED_WALLPAPER_ID=""
+TOGGLE_VALUE=""
+declare -a WALLPAPER_CHOICES=()
+declare -A WALLPAPER_TITLES=()
+
 need_gum() {
   command -v gum >/dev/null 2>&1 || {
     echo "gum is required (ships with Omarchy)." >&2
@@ -16,136 +23,448 @@ need_gum() {
   }
 }
 
-offer_apply_now() {
-  we_load_config
-  local active
-  active=$(we_jq -r '.active // false')
-  if [[ $active != true ]] && ! we_engine_running; then
-    return 0
-  fi
-  if gum confirm "Engine is active — Apply now?" --default=true; then
-    "$WE" apply || gum style --foreground 1 "Apply failed — run Doctor."
-  fi
+show_error() {
+  local message=${1:-"Wallpaper Engine command failed"}
+  gum style --foreground 1 "$message"
 }
 
-pick_monitor() {
-  local monitors=()
-  mapfile -t monitors < <(we_list_monitors)
-  if ((${#monitors[@]} == 0)); then
-    gum style --foreground 1 "No monitors detected via hyprctl."
-    return 1
-  fi
-  if ((${#monitors[@]} == 1)); then
-    printf '%s\n' "${monitors[0]}"
+show_success() {
+  gum style --foreground 2 "$1"
+}
+
+run_we() {
+  local success_message=$1 output
+  shift
+  if output=$("$WE" "$@" 2>&1); then
+    show_success "$success_message"
     return 0
   fi
-  printf '%s\n' "${monitors[@]}" | gum choose --header "Select display"
+
+  local first_line=${output%%$'\n'*}
+  show_error "${first_line:-Wallpaper Engine command failed}"
+  if [[ $output == *$'\n'* ]]; then
+    printf '%s\n' "$output" | gum pager
+  fi
+  return 1
+}
+
+status_json() {
+  "$WE" status --json 2>/dev/null || echo '{}'
+}
+
+monitor_is_running() {
+  local monitor=$1 snapshot=${2:-} key
+  [[ -n $snapshot ]] || snapshot=$(status_json)
+  key=$(we_monitor_key "$monitor")
+  jq -e --arg key "$key" '(.engineDisplays // []) | index($key) != null' \
+    >/dev/null 2>&1 <<<"$snapshot"
+}
+
+load_wallpaper_catalog() {
+  $WALLPAPER_CATALOG_LOADED && return 0
+
+  WALLPAPER_CHOICES=()
+  WALLPAPER_TITLES=()
+  local id title path preview
+  while IFS=$'\t' read -r id title path preview; do
+    [[ -n $id ]] || continue
+    WALLPAPER_CHOICES+=("$id"$'\t'"$title")
+    WALLPAPER_TITLES["$id"]=$title
+  done < <(we_list_wallpapers | sort -t$'\t' -k2,2)
+  WALLPAPER_CATALOG_LOADED=true
+}
+
+refresh_wallpaper_catalog() {
+  WALLPAPER_CATALOG_LOADED=false
+  load_wallpaper_catalog
+  if ((${#WALLPAPER_CHOICES[@]})); then
+    show_success "Workshop catalog refreshed (${#WALLPAPER_CHOICES[@]} wallpapers)."
+  else
+    show_error "No Workshop wallpapers found."
+  fi
 }
 
 pick_wallpaper_id() {
-  local lines=() id title path picked
-  while IFS=$'\t' read -r id title path preview; do
-    [[ -n $id ]] || continue
-    lines+=("$id"$'\t'"$title")
-  done < <(we_list_wallpapers | sort -t$'\t' -k2,2)
-
-  if ((${#lines[@]} == 0)); then
-    gum style --foreground 1 "No Workshop wallpapers found."
+  load_wallpaper_catalog
+  PICKED_WALLPAPER_ID=""
+  if ((${#WALLPAPER_CHOICES[@]} == 0)); then
+    show_error "No Workshop wallpapers found."
+    gum style --faint "Add a Wallpaper Engine library under Wallpaper folders."
     return 1
   fi
 
-  picked=$(printf '%s\n' "${lines[@]}" | gum filter --header "Pick a wallpaper" --height 20) || return 1
-  printf '%s\n' "${picked%%$'\t'*}"
+  local picked
+  picked=$(printf '%s\n' "${WALLPAPER_CHOICES[@]}" \
+    | gum filter --header "Workshop wallpapers — search by title or ID" --height 20) \
+    || return 1
+  PICKED_WALLPAPER_ID=${picked%%$'\t'*}
 }
 
-# Stay in the display submenu until Back.
-edit_display() {
-  local monitor
-  monitor=$(pick_monitor) || return 1
-  we_load_config
-  we_jq_write --arg m "$monitor" '.displays[$m] = (.displays[$m] // {})'
+pick_monitor() {
+  local snapshot line picked
+  local -a choices=()
+  snapshot=$(status_json)
 
+  while IFS= read -r line; do
+    [[ -n $line ]] && choices+=("$line")
+  done < <(jq -r '
+    .monitors[]? |
+    (.name | tostring) as $name |
+    (if (.width != null and .height != null and .width > 0 and .height > 0)
+      then "\($name) · \(.width)×\(.height)"
+      else $name end) as $title |
+    "\($name)\t\($title)"
+  ' <<<"$snapshot")
+
+  PICKED_MONITOR=""
+  if ((${#choices[@]} == 0)); then
+    show_error "No displays detected via hyprctl."
+    return 1
+  fi
+
+  local i monitor label state
+  for i in "${!choices[@]}"; do
+    monitor=${choices[$i]%%$'\t'*}
+    label=${choices[$i]#*$'\t'}
+    if monitor_is_running "$monitor" "$snapshot"; then state=Running; else state=Stopped; fi
+    choices[$i]="$monitor"$'\t'"$label  [$state]"
+  done
+
+  if ((${#choices[@]} == 1)); then
+    PICKED_MONITOR=${choices[0]%%$'\t'*}
+    return 0
+  fi
+  picked=$(printf '%s\n' "${choices[@]}" | gum choose --header "Displays") || return 1
+  PICKED_MONITOR=${picked%%$'\t'*}
+}
+
+save_display_setting() {
+  local monitor=$1 message=$2
+  shift 2
+  if "$WE" set-display "$monitor" "$@" >/dev/null; then
+    show_success "$message — saved. Choose Save & apply to go live."
+    return 0
+  fi
+  show_error "Could not save settings for $monitor."
+  return 1
+}
+
+choose_toggle() {
+  local header=$1 current=$2 on_label=$3 off_label=$4 picked
+  TOGGLE_VALUE=""
+  if [[ $current == true ]]; then
+    picked=$(printf '%s\n' "$on_label (current)" "$off_label" \
+      | gum choose --header "$header") || return 1
+  else
+    picked=$(printf '%s\n' "$on_label" "$off_label (current)" \
+      | gum choose --header "$header") || return 1
+  fi
+  if [[ $picked == "$on_label"* ]]; then
+    TOGGLE_VALUE=true
+  else
+    TOGGLE_VALUE=false
+  fi
+}
+
+edit_wallpaper_properties() {
+  local monitor=$1 wallpaper=$2 caps action key value label type current
+  local -a options=()
+  [[ -n $wallpaper ]] || {
+    show_error "Pick a wallpaper first."
+    return 0
+  }
+
+  caps=$("$WE" properties "$wallpaper" --json 2>/dev/null || echo '{}')
   while true; do
-    we_load_config
-    local wp scaling fps
-    wp=$(we_display_wallpaper "$monitor")
-    [[ -n $wp ]] || wp="(none)"
-    scaling=$(we_display_setting "$monitor" scaling)
-    fps=$(we_display_setting "$monitor" fps)
+    local -a actions=("Show wallpaper capabilities")
+    while IFS=$'\t' read -r key label type current; do
+      [[ -n $key ]] || continue
+      actions+=("$key"$'\t'"${label:-$key} · ${type:-value} · ${current:-(default)}")
+    done < <(jq -r --argjson saved "$(we_effective_display_json "$monitor" | jq '.properties')" '
+      .properties[]? |
+      [.key, (.label // .key), (.type // "value"),
+       (($saved[.key] // .value // "") | tostring)] | @tsv
+    ' <<<"$caps")
+    actions+=("Set custom property" "Back")
 
-    local action
-    action=$(printf '%s\n' \
-      "Pick wallpaper" \
-      "Scaling ($scaling)" \
-      "FPS ($fps)" \
-      "Wallpaper properties (--set-property)" \
-      "Audio (silent/volume)" \
-      "Clamp" \
-      "Show settings" \
-      "Clear display config" \
-      "Back" | gum choose --header "Display: $monitor  ·  wallpaper $wp") || return 0
-
+    action=$(printf '%s\n' "${actions[@]}" \
+      | gum choose --header "Wallpaper properties · $wallpaper") || return 0
     case "$action" in
-      "Pick wallpaper")
-        local id
-        id=$(pick_wallpaper_id) || continue
-        "$WE" set-display "$monitor" --wallpaper "$id"
-        offer_apply_now
+      "Show wallpaper capabilities")
+        printf '%s\n' "$caps" | jq . | gum pager || true
         ;;
-      Scaling*)
-        local scaling_new
-        scaling_new=$(printf '%s\n' fill fit stretch default | gum choose --header "Scaling for $monitor") || continue
-        "$WE" set-display "$monitor" --scaling "$scaling_new"
-        offer_apply_now
-        ;;
-      FPS*)
-        local fps_new
-        fps_new=$(gum input --header "FPS for $monitor" --value "$(we_display_setting "$monitor" fps)") || continue
-        "$WE" set-display "$monitor" --fps "$fps_new"
-        offer_apply_now
-        ;;
-      "Wallpaper properties (--set-property)")
-        local wp_id prop_out key value
-        wp_id=$(we_display_wallpaper "$monitor")
-        if [[ -z $wp_id ]]; then
-          gum style --foreground 1 "Pick a wallpaper first."
-          continue
-        fi
-        gum style --faint "No global speed flag — properties are wallpaper-specific (e.g. rate)."
-        if gum confirm "List properties for $wp_id via linux-wallpaperengine?" --default=true; then
-          prop_out=$("$WE" properties "$wp_id" 2>&1 || true)
-          printf '%s\n' "$prop_out" | gum pager
-        fi
-        key=$(gum input --header "Property name (e.g. rate)" --placeholder "rate") || continue
+      "Set custom property")
+        key=$(gum input --header "Custom property name" --placeholder "rate") || continue
         [[ -n $key ]] || continue
         value=$(gum input --header "Value for $key" --placeholder "1.0") || continue
-        "$WE" set-property "$monitor" "$key" "$value"
-        offer_apply_now
+        [[ -n $value ]] || continue
+        run_we "Property saved — choose Save & apply to go live." \
+          set-property "$monitor" "$key" "$value" || true
         ;;
-      "Audio (silent/volume)")
-        local mode
-        mode=$(printf '%s\n' Silent Audio | gum choose --header "Audio for $monitor") || continue
-        if [[ $mode == Silent ]]; then
-          "$WE" set-display "$monitor" --silent
+      Back)
+        return 0
+        ;;
+      *)
+        key=${action%%$'\t'*}
+        label=$(jq -r --arg key "$key" '.properties[]? | select(.key == $key) | .label // .key' \
+          <<<"$caps" | head -n1)
+        type=$(jq -r --arg key "$key" '.properties[]? | select(.key == $key) | .type // "value"' \
+          <<<"$caps" | head -n1)
+        current=$(we_effective_display_json "$monitor" | jq -r --arg key "$key" \
+          --argjson caps "$caps" '.properties[$key] // ($caps.properties[]? | select(.key == $key) | .value) // ""')
+        if [[ ${type,,} == bool ]]; then
+          choose_toggle "$label" "$current" "Enabled" "Disabled" || continue
+          value=$TOGGLE_VALUE
+        elif [[ ${type,,} == combo ]]; then
+          options=()
+          mapfile -t options < <(jq -r --arg key "$key" '
+            .properties[]? | select(.key == $key) | .options[]? |
+            if type == "object" then "\(.value)\t\(.label // .value)" else tostring end
+          ' <<<"$caps")
+          value=$(printf '%s\n' "${options[@]}" | gum choose --header "$label") || continue
+          value=${value%%$'\t'*}
         else
-          local vol
-          vol=$(gum input --header "Volume 0-100" --value "$(we_display_setting "$monitor" volume)") || continue
-          "$WE" set-display "$monitor" --audio --volume "$vol"
+          value=$(gum input --header "$label ($type)" --value "$current") || continue
+          [[ -n $value ]] || continue
         fi
-        offer_apply_now
+        run_we "Property saved — choose Save & apply to go live." \
+          set-property "$monitor" "$key" "$value" || true
         ;;
-      Clamp)
-        local clamp
-        clamp=$(printf '%s\n' border clamp repeat | gum choose --header "Clamp mode") || continue
-        "$WE" set-display "$monitor" --clamp "$clamp"
-        offer_apply_now
+    esac
+  done
+}
+
+edit_display() {
+  pick_monitor || return 0
+  local monitor=$PICKED_MONITOR
+
+  while true; do
+    local effective snapshot running=false configured wallpaper wallpaper_title
+    local scaling fps clamp layer silent volume noautomute no_audio_processing
+    local no_fullscreen_pause pause_only_active ignored_apps particles mouse parallax
+    effective=$(we_effective_display_json "$monitor")
+    snapshot=$(status_json)
+    monitor_is_running "$monitor" "$snapshot" && running=true
+    configured=$(jq -r '.configured' <<<"$effective")
+    wallpaper=$(jq -r '.wallpaper // empty' <<<"$effective")
+    wallpaper_title=$(jq -r '.wallpaperTitle // empty' <<<"$effective")
+    if [[ -z $wallpaper_title ]]; then
+      if [[ -n $wallpaper && -n ${WALLPAPER_TITLES[$wallpaper]+x} ]]; then
+        wallpaper_title=${WALLPAPER_TITLES[$wallpaper]}
+      else
+        wallpaper_title=${wallpaper:-none}
+      fi
+    fi
+    scaling=$(jq -r '.scaling' <<<"$effective")
+    fps=$(jq -r '.fps' <<<"$effective")
+    clamp=$(jq -r '.clamp' <<<"$effective")
+    layer=$(jq -r '.layer' <<<"$effective")
+    silent=$(jq -r '.silent' <<<"$effective")
+    volume=$(jq -r '.volume' <<<"$effective")
+    noautomute=$(jq -r '.noautomute' <<<"$effective")
+    no_audio_processing=$(jq -r '.noAudioProcessing' <<<"$effective")
+    no_fullscreen_pause=$(jq -r '.noFullscreenPause' <<<"$effective")
+    pause_only_active=$(jq -r '.fullscreenPauseOnlyActive' <<<"$effective")
+    ignored_apps=$(jq -r '.fullscreenPauseIgnoreAppIds | join(", ")' <<<"$effective")
+    particles=$(jq -r '.disableParticles' <<<"$effective")
+    mouse=$(jq -r '.disableMouse' <<<"$effective")
+    parallax=$(jq -r '.disableParallax' <<<"$effective")
+
+    local runtime_label=Stopped
+    $running && runtime_label=Running
+    local -a actions=()
+    if $running; then
+      actions+=("Stop this display")
+    elif [[ $configured == true && -n $wallpaper ]]; then
+      actions+=("Start this display")
+    else
+      actions+=("Start this display (save a wallpaper first)")
+    fi
+    actions+=(
+      "Save & apply"
+      "Pick wallpaper ($wallpaper_title)"
+      "Scaling ($scaling)"
+      "FPS ($fps)"
+      "Clamp ($clamp)"
+      "Wayland layer ($layer)"
+      "Audio ($([[ $silent == true ]] && echo muted || echo "volume $volume"))"
+      "Disable automute ($noautomute)"
+      "Disable audio processing ($no_audio_processing)"
+      "Keep playing when fullscreen ($no_fullscreen_pause)"
+      "Pause only for active fullscreen app ($pause_only_active)"
+      "Ignore fullscreen app IDs (${ignored_apps:-none})"
+      "Disable particles ($particles)"
+      "Disable mouse interaction ($mouse)"
+      "Disable parallax ($parallax)"
+      "Wallpaper properties"
+      "Show effective settings"
+      "Clear display settings"
+      "Back"
+    )
+
+    local action selected value value_number
+    action=$(printf '%s\n' "${actions[@]}" \
+      | gum choose --header "Wallpaper Engine for Omarchy · $monitor · $runtime_label") \
+      || return 0
+    case "$action" in
+      "Start this display")
+        run_we "Started $monitor." apply "$monitor" || true
         ;;
-      "Show settings")
-        we_jq --arg m "$monitor" '.displays[$m] // {}' | gum pager
+      "Start this display (save a wallpaper first)")
+        show_error "Pick a wallpaper, then choose Save & apply."
         ;;
-      "Clear display config")
-        "$WE" set-display "$monitor" --clear
-        offer_apply_now
+      "Stop this display")
+        run_we "Stopped $monitor." stop "$monitor" || true
+        ;;
+      "Pick wallpaper"*)
+        if pick_wallpaper_id; then
+          save_display_setting "$monitor" "Wallpaper selected" \
+            --wallpaper "$PICKED_WALLPAPER_ID" || true
+        fi
+        ;;
+      Scaling*)
+        selected=$(printf '%s\n' fill fit stretch default \
+          | gum choose --header "Scaling for $monitor") || continue
+        save_display_setting "$monitor" "Scaling $selected" --scaling "$selected" || true
+        ;;
+      FPS*)
+        value=$(gum input --header "FPS for $monitor (1–240)" --value "$fps") || continue
+        if [[ ! $value =~ ^[0-9]+$ ]]; then
+          show_error "FPS must be between 1 and 240."
+          continue
+        fi
+        value_number=$((10#$value))
+        if ((value_number < 1 || value_number > 240)); then
+          show_error "FPS must be between 1 and 240."
+          continue
+        fi
+        save_display_setting "$monitor" "FPS $value_number" --fps "$value_number" || true
+        ;;
+      Clamp*)
+        selected=$(printf '%s\n' border clamp repeat \
+          | gum choose --header "Clamp mode for $monitor") || continue
+        save_display_setting "$monitor" "Clamp $selected" --clamp "$selected" || true
+        ;;
+      "Wayland layer"*)
+        selected=$(printf '%s\n' bottom top overlay \
+          | gum choose --header "Wayland layer (bottom recommended)") || continue
+        save_display_setting "$monitor" "Layer $selected" --layer "$selected" || true
+        ;;
+      Audio*)
+        choose_toggle "Wallpaper audio for $monitor" \
+          "$([[ $silent == false ]] && echo true || echo false)" \
+          "Audio enabled" "Muted" || continue
+        if [[ $TOGGLE_VALUE == true ]]; then
+          value=$(gum input --header "Volume (0–100)" --value "$volume") || continue
+          if [[ ! $value =~ ^[0-9]+$ ]]; then
+            show_error "Volume must be between 0 and 100."
+            continue
+          fi
+          value_number=$((10#$value))
+          if ((value_number < 0 || value_number > 100)); then
+            show_error "Volume must be between 0 and 100."
+            continue
+          fi
+          save_display_setting "$monitor" "Audio enabled at $value_number" \
+            --audio --volume "$value_number" || true
+        else
+          save_display_setting "$monitor" "Audio muted" --silent || true
+        fi
+        ;;
+      "Disable automute"*)
+        choose_toggle "Disable automute" "$noautomute" "Disabled" "Enabled" || continue
+        if [[ $TOGGLE_VALUE == true ]]; then
+          save_display_setting "$monitor" "Automute disabled" --noautomute || true
+        else
+          save_display_setting "$monitor" "Automute enabled" --automute || true
+        fi
+        ;;
+      "Disable audio processing"*)
+        choose_toggle "Disable audio-reactive processing" "$no_audio_processing" \
+          "Disabled" "Enabled" || continue
+        if [[ $TOGGLE_VALUE == true ]]; then
+          save_display_setting "$monitor" "Audio processing disabled" --no-audio-processing || true
+        else
+          save_display_setting "$monitor" "Audio processing enabled" --audio-processing || true
+        fi
+        ;;
+      "Keep playing when fullscreen"*)
+        choose_toggle "Keep playing when fullscreen" "$no_fullscreen_pause" "Yes" "No" || continue
+        if [[ $TOGGLE_VALUE == true ]]; then
+          save_display_setting "$monitor" "Fullscreen pause disabled" --no-fullscreen-pause || true
+        else
+          save_display_setting "$monitor" "Fullscreen pause enabled" --fullscreen-pause || true
+        fi
+        ;;
+      "Pause only for active fullscreen app"*)
+        if [[ $no_fullscreen_pause == true ]]; then
+          show_error "Enable fullscreen pausing before changing this option."
+        else
+          choose_toggle "Pause only for the active fullscreen app" "$pause_only_active" \
+            "Yes" "No" || continue
+          if [[ $TOGGLE_VALUE == true ]]; then
+            save_display_setting "$monitor" "Active-only fullscreen pause enabled" \
+              --fullscreen-pause-only-active || true
+          else
+            save_display_setting "$monitor" "Any-app fullscreen pause enabled" \
+              --fullscreen-pause-any || true
+          fi
+        fi
+        ;;
+      "Ignore fullscreen app IDs"*)
+        if [[ $no_fullscreen_pause == true ]]; then
+          show_error "Enable fullscreen pausing before editing ignored app IDs."
+          continue
+        fi
+        value=$(gum input --header "Comma-separated app_id fragments" --value "$ignored_apps") || continue
+        save_display_setting "$monitor" "Fullscreen ignore list updated" \
+          --fullscreen-pause-ignore-appids "$value" || true
+        ;;
+      "Disable particles"*)
+        choose_toggle "Disable scene particles" "$particles" "Disabled" "Enabled" || continue
+        if [[ $TOGGLE_VALUE == true ]]; then
+          save_display_setting "$monitor" "Particles disabled" --disable-particles || true
+        else
+          save_display_setting "$monitor" "Particles enabled" --particles || true
+        fi
+        ;;
+      "Disable mouse interaction"*)
+        choose_toggle "Disable mouse interaction" "$mouse" "Disabled" "Enabled" || continue
+        if [[ $TOGGLE_VALUE == true ]]; then
+          save_display_setting "$monitor" "Mouse interaction disabled" --disable-mouse || true
+        else
+          save_display_setting "$monitor" "Mouse interaction enabled" --mouse || true
+        fi
+        ;;
+      "Disable parallax"*)
+        choose_toggle "Disable parallax" "$parallax" "Disabled" "Enabled" || continue
+        if [[ $TOGGLE_VALUE == true ]]; then
+          save_display_setting "$monitor" "Parallax disabled" --disable-parallax || true
+        else
+          save_display_setting "$monitor" "Parallax enabled" --parallax || true
+        fi
+        ;;
+      "Wallpaper properties")
+        edit_wallpaper_properties "$monitor" "$wallpaper"
+        ;;
+      "Show effective settings")
+        printf '%s\n' "$effective" | jq . | gum pager || true
+        ;;
+      "Save & apply")
+        if [[ -z $wallpaper ]]; then
+          show_error "Select a wallpaper first."
+        else
+          run_we "Applied to $monitor." apply "$monitor" || true
+        fi
+        ;;
+      "Clear display settings")
+        if gum confirm "Clear saved settings and stop $monitor?" --default=false; then
+          if "$WE" set-display "$monitor" --clear >/dev/null; then
+            run_we "Cleared and stopped $monitor." stop "$monitor" || true
+          else
+            show_error "Could not clear $monitor."
+          fi
+        fi
         ;;
       Back)
         return 0
@@ -154,22 +473,99 @@ edit_display() {
   done
 }
 
+wallpaper_folders_menu() {
+  while true; do
+    local folders action path selected
+    local -a additional=()
+    folders=$("$WE" wallpaper-dirs --json 2>/dev/null || echo '{"additional":[],"effective":[]}')
+    mapfile -t additional < <(jq -r '.additional[]?' <<<"$folders")
+    local count=${#additional[@]}
+    action=$(printf '%s\n' \
+      "Add folder" \
+      "Remove folder ($count additional)" \
+      "Show effective folders" \
+      "Refresh Workshop catalog" \
+      "Back" | gum choose --header "Wallpaper folders") || return 0
+
+    case "$action" in
+      "Add folder")
+        path=$(gum input --header "Steam library or Workshop content folder" \
+          --placeholder "/mnt/games/SteamLibrary") || continue
+        [[ -n $path ]] || continue
+        if run_we "Wallpaper folder added." set-wallpaper-dirs "${additional[@]}" "$path"; then
+          WALLPAPER_CATALOG_LOADED=false
+        fi
+        ;;
+      "Remove folder"*)
+        if ((count == 0)); then
+          show_error "There are no additional folders to remove."
+          continue
+        fi
+        selected=$(printf '%s\n' "${additional[@]}" \
+          | gum choose --header "Remove additional folder") || continue
+        local -a kept=()
+        for path in "${additional[@]}"; do
+          [[ $path == "$selected" ]] || kept+=("$path")
+        done
+        if run_we "Wallpaper folder removed." set-wallpaper-dirs "${kept[@]}"; then
+          WALLPAPER_CATALOG_LOADED=false
+        fi
+        ;;
+      "Show effective folders")
+        "$WE" wallpaper-dirs | gum pager || true
+        ;;
+      "Refresh Workshop catalog")
+        refresh_wallpaper_catalog
+        ;;
+      Back)
+        return 0
+        ;;
+    esac
+  done
+}
+
+toggle_auto_theme() {
+  local snapshot active engine source
+  snapshot=$(status_json)
+  active=$(jq -r '.autoThemeActive // false' <<<"$snapshot")
+  engine=$(jq -r '.engineRunning // false' <<<"$snapshot")
+  source=$(jq -r '.lastAppliedMonitor // empty' <<<"$snapshot")
+
+  if [[ $active == true ]]; then
+    run_we "Restored the previous theme." undo-auto-theme || true
+  elif [[ $engine != true ]]; then
+    show_error "Start a wallpaper before auto-matching its theme."
+  elif [[ -z $source ]]; then
+    show_error "Save & apply a wallpaper before auto-matching its theme."
+  else
+    run_we "Theme matched to the most recently applied wallpaper ($source)." auto-theme || true
+  fi
+}
+
 main_menu() {
   need_gum
   we_load_config
 
   while true; do
-    local engine header
-    if we_engine_running; then engine=running; else engine=stopped; fi
-    header="Wallpaper Engine  ·  $engine  ·  theme $(we_current_theme_name)"
+    local snapshot theme active source auto_label header choice
+    snapshot=$(status_json)
+    theme=$(jq -r '.theme // "unknown"' <<<"$snapshot")
+    active=$(jq -r '.autoThemeActive // false' <<<"$snapshot")
+    source=$(jq -r '.lastAppliedMonitor // empty' <<<"$snapshot")
+    header="Wallpaper Engine for Omarchy · theme $theme"
+    if [[ $active == true ]]; then
+      auto_label="Undo theme match"
+    elif [[ -n $source ]]; then
+      auto_label="Auto-match theme (last applied: $source)"
+    else
+      auto_label="Auto-match theme (apply a wallpaper first)"
+    fi
 
-    local choice
     choice=$(printf '%s\n' \
-      "Browse & apply wallpaper" \
-      "Per-display settings" \
-      "Apply saved config" \
-      "Stop Wallpaper Engine" \
+      "Displays & wallpapers" \
+      "$auto_label" \
       "Revert to Omarchy theme background" \
+      "Wallpaper folders" \
       "Status" \
       "Doctor (deps & paths)" \
       "Edit config file" \
@@ -178,50 +574,36 @@ main_menu() {
       "Quit" | gum choose --header "$header") || exit 0
 
     case "$choice" in
-      "Browse & apply wallpaper")
-        "$WE" browse || true
+      "Displays & wallpapers")
+        edit_display
         ;;
-      "Per-display settings")
-        edit_display || true
-        ;;
-      "Apply saved config")
-        if "$WE" apply; then
-          gum style --foreground 2 "Applied."
-          sleep 0.5
-        else
-          gum style --foreground 1 "Apply failed — run Doctor."
-          gum confirm "Continue?" --default=true >/dev/null || true
-        fi
-        ;;
-      "Stop Wallpaper Engine")
-        "$WE" stop
+      "Auto-match theme"*|"Undo theme match")
+        toggle_auto_theme
         ;;
       "Revert to Omarchy theme background")
-        if "$WE" revert; then
-          gum style --foreground 2 "Reverted to Omarchy theme background."
-        else
-          gum style --foreground 1 "Revert failed."
-        fi
-        sleep 0.7
+        run_we "Reverted to the Omarchy theme background." revert || true
+        ;;
+      "Wallpaper folders")
+        wallpaper_folders_menu
         ;;
       Status)
-        we_status_text | gum pager
+        "$WE" status | gum pager || true
         ;;
       "Doctor (deps & paths)")
-        "$WE" doctor | gum pager
+        "$WE" doctor | gum pager || true
         ;;
       "Edit config file")
         "$WE" config --edit
         ;;
       "Install menu entry")
-        "$WE" install-menu
-        gum style --foreground 2 "Menu: Style → Wallpaper Engine (GUI) + Revert + advanced TUI."
-        sleep 0.8
+        if "$WE" install-menu; then
+          show_success "Menu: Style → Wallpaper Engine (GUI) + Revert + advanced TUI."
+        fi
         ;;
       "Install autostart hooks")
-        "$WE" install-hooks
-        gum style --foreground 2 "post-boot + theme-set hooks installed."
-        sleep 0.8
+        if "$WE" install-hooks; then
+          show_success "post-boot + theme-set hooks installed."
+        fi
         ;;
       Quit)
         exit 0
@@ -230,4 +612,6 @@ main_menu() {
   done
 }
 
-main_menu
+if [[ ${WE_MENU_TEST_MODE:-0} != 1 ]]; then
+  main_menu
+fi
