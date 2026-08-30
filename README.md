@@ -10,10 +10,6 @@ https://github.com/user-attachments/assets/8a745361-9db8-40a0-b371-2725e26a6d5e
 
 ## Requirements
 
-This plugin is not an AUR package.
-
-**Required** (before `omarchy-we apply`):
-
 - [linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) — AUR.
 
 ```bash
