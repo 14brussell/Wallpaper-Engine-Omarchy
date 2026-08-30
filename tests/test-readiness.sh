@@ -50,58 +50,43 @@ PY
 }
 
 test_incremental_screenshot_is_rechecked_after_stabilizing() (
-  local screenshot="$TEST_ROOT/incremental.bmp"
-  local complete="$TEST_ROOT/incremental-complete.bmp"
-  local publish="$TEST_ROOT/publish-incremental"
-  local writer_pid first_probe=1
+  local screenshot="$TEST_ROOT/incremental.jpg"
+  local complete="$TEST_ROOT/incremental-complete.jpg"
+  local writer_pid
 
   python3 - "$complete" <<'PY'
 import sys
 from PIL import Image
 
-image = Image.new("RGB", (32, 32), "black")
-image.putpixel((15, 15), (255, 0, 0))
-image.save(sys.argv[1])
+image = Image.effect_noise((1024, 768), 100).convert("RGB")
+image.save(sys.argv[1], quality=95)
 PY
-  head -c 64 "$complete" >"$screenshot"
+  (( $(stat -c%s "$complete") > 65536 )) \
+    || fail 'complete JPEG fixture is too small for an incremental prefix'
+  head -c 65536 "$complete" >"$screenshot"
 
   we_file_is_image "$screenshot" \
     || fail 'incremental fixture header was not recognized as an image'
-  if we_lwe_fbo_painted "$screenshot"; then
-    fail 'incomplete screenshot fixture was incorrectly considered painted'
-  fi
+  [[ $(we_lwe_fbo_state "$screenshot") == incomplete ]] \
+    || fail 'truncated JPEG fixture was not classified as incomplete'
 
-  # Publish the remaining pixels immediately after the first paint probe. This
-  # deterministically recreates LWE extending a screenshot between the failed
-  # paint decode and the following valid-image check.
+  # Keep a metadata-valid JPEG prefix unchanged longer than several readiness
+  # polls, then publish the remaining pixels as LWE does when writing in place.
+  # A size/mtime-only guard would still misclassify the paused prefix as clear.
   (
-    while [[ ! -e $publish ]]; do
-      sleep 0.005
-    done
-    dd if="$complete" of="$screenshot" bs=1 skip=64 seek=64 \
+    sleep 0.6
+    dd if="$complete" of="$screenshot" bs=1 skip=65536 seek=65536 \
       conv=notrunc status=none
   ) &
   writer_pid=$!
-
-  we_lwe_fbo_painted() {
-    local path=${1:-$WE_LWE_SCREENSHOT}
-    local eps=${2:-$WE_LWE_PAINT_EPS}
-    local rc=0
-    [[ -n $path && -f $path ]] || return 1
-    we_file_is_image "$path" || return 1
-    we_compose_py painted "$path" --epsilon "$eps" >/dev/null 2>&1 || rc=$?
-    if (( first_probe == 1 )); then
-      first_probe=0
-      : >"$publish"
-      wait "$writer_pid"
-    fi
-    return "$rc"
-  }
+  trap 'kill "$writer_pid" 2>/dev/null || true; wait "$writer_pid" 2>/dev/null || true' EXIT
 
   WE_LWE_SCREENSHOT="$screenshot"
-  if ! we_wait_engine_first_paint 1000 >/dev/null 2>&1; then
+  if ! we_wait_engine_first_paint 1500 >/dev/null 2>&1; then
     fail 'painted screenshot published during the readiness probe was rejected'
   fi
+  wait "$writer_pid"
+  trap - EXIT
 )
 
 test_readback_fallback_requires_replacement_layer() {

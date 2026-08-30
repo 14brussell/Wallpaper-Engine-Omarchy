@@ -1331,14 +1331,29 @@ we_wait_engine_layer() {
   done
 }
 
+# Decode the entire LWE FBO dump and print painted, clear, or incomplete.
+# Header/dimension probes are insufficient while LWE is writing a JPEG in
+# place: they can succeed before the compressed pixel stream is complete.
+we_lwe_fbo_state() {
+  local path=${1:-$WE_LWE_SCREENSHOT}
+  local eps=${2:-$WE_LWE_PAINT_EPS}
+  local state
+  [[ -n $path && -f $path ]] || {
+    printf '%s\n' incomplete
+    return 0
+  }
+  state=$(we_compose_py paint-state "$path" --epsilon "$eps" 2>/dev/null) \
+    || state=incomplete
+  case $state in
+    painted|clear|incomplete) printf '%s\n' "$state" ;;
+    *) printf '%s\n' incomplete ;;
+  esac
+}
+
 # LWE FBO dump (--screenshot) is painted when it is not a uniform ~0 clear.
 # Do not use mean brightness (dark wallpapers) or compositor grim (sees TO).
 we_lwe_fbo_painted() {
-  local path=${1:-$WE_LWE_SCREENSHOT}
-  local eps=${2:-$WE_LWE_PAINT_EPS}
-  [[ -n $path && -f $path ]] || return 1
-  we_file_is_image "$path" || return 1
-  we_compose_py painted "$path" --epsilon "$eps" >/dev/null 2>&1
+  [[ $(we_lwe_fbo_state "${1:-$WE_LWE_SCREENSHOT}" "${2:-$WE_LWE_PAINT_EPS}") == painted ]]
 }
 
 # True only for linux-wallpaperengine's known FBO readback failure. Keep this
@@ -1381,49 +1396,51 @@ we_wait_lwe_readback_grace() {
 }
 
 # Overlay still shows TO. hyprctl map/alpha is not a paint signal.
-# Poll until the one-shot FBO screenshot exists and is complete. A structured
-# image is confirmed paint. Before treating a valid clear image as final, its
-# size/mtime/inode must stay unchanged across polls and the paint probe must be
-# repeated; LWE writes the screenshot in place, so a decoder can observe valid
-# metadata while the pixels are still arriving. A stable clear image fails
-# unless the exact guarded readback fallback above succeeds. Return 1 at
-# WE_LWE_READY_MS for a missing/incomplete image. Optional identity, monitor,
-# and log arguments let per-display replacements use the fallback and fail if
-# LWE exits.
+# Poll until the one-shot FBO screenshot exists and fully decodes. A structured
+# image is confirmed paint. Before treating a fully decoded clear image as
+# final, its size/mtime/inode must stay unchanged across polls and the tri-state
+# probe must confirm clear again. A stable clear image fails unless the exact
+# guarded readback fallback above succeeds. Return 1 at WE_LWE_READY_MS for a
+# missing/incomplete image. Optional identity, monitor, and log arguments let
+# per-display replacements use the fallback and fail if LWE exits.
 we_wait_engine_first_paint() {
   local timeout=${1:-$WE_LWE_READY_MS}
   local engine_pid=${2:-} engine_start=${3:-} monitor=${4:-} log_file=${5:-}
-  local start now clear_signature="" signature confirmed_signature
+  local start now state clear_signature="" signature confirmed_signature
   start=$(we_now_ms)
   we_transition_log "polling LWE FBO $WE_LWE_SCREENSHOT (max ${timeout}ms; require structure or guarded readback fallback)"
   while true; do
-    if we_lwe_fbo_painted; then
-      we_transition_log "LWE FBO painted"
-      return 0
-    fi
-    if [[ -f $WE_LWE_SCREENSHOT ]] && we_file_is_image "$WE_LWE_SCREENSHOT"; then
-      signature=$(stat -Lc '%s:%y:%i' "$WE_LWE_SCREENSHOT" 2>/dev/null || true)
-      if [[ -n $signature && $signature == "$clear_signature" ]]; then
-        if we_lwe_fbo_painted; then
-          we_transition_log "LWE FBO painted after stable-file confirmation"
-          return 0
-        fi
-        confirmed_signature=$(stat -Lc '%s:%y:%i' "$WE_LWE_SCREENSHOT" 2>/dev/null || true)
-        if [[ $confirmed_signature == "$signature" ]] \
-          && we_file_is_image "$WE_LWE_SCREENSHOT"; then
-          if [[ -n $engine_pid && -n $engine_start && -n $monitor && -n $log_file ]] \
-            && we_wait_lwe_readback_grace \
-              "$engine_pid" "$engine_start" "$monitor" "$log_file"; then
+    state=$(we_lwe_fbo_state)
+    case $state in
+      painted)
+        we_transition_log "LWE FBO painted"
+        return 0
+        ;;
+      clear)
+        signature=$(stat -Lc '%s:%y:%i' "$WE_LWE_SCREENSHOT" 2>/dev/null || true)
+        if [[ -n $signature && $signature == "$clear_signature" ]]; then
+          state=$(we_lwe_fbo_state)
+          confirmed_signature=$(stat -Lc '%s:%y:%i' "$WE_LWE_SCREENSHOT" 2>/dev/null || true)
+          if [[ $state == painted ]]; then
+            we_transition_log "LWE FBO painted after stable-file confirmation"
             return 0
           fi
-          we_transition_log "LWE FBO is a complete stable clear image; one-shot readiness probe failed"
-          return 1
+          if [[ $state == clear && $confirmed_signature == "$signature" ]]; then
+            if [[ -n $engine_pid && -n $engine_start && -n $monitor && -n $log_file ]] \
+              && we_wait_lwe_readback_grace \
+                "$engine_pid" "$engine_start" "$monitor" "$log_file"; then
+              return 0
+            fi
+            we_transition_log "LWE FBO is a complete stable clear image; one-shot readiness probe failed"
+            return 1
+          fi
         fi
-      fi
-      clear_signature=$signature
-    else
-      clear_signature=""
-    fi
+        clear_signature=$signature
+        ;;
+      *)
+        clear_signature=""
+        ;;
+    esac
     if [[ -n $engine_pid && -n $engine_start ]] \
       && ! we_is_engine_pid "$engine_pid" "$engine_start"; then
       we_transition_log "LWE exited before producing a painted FBO"

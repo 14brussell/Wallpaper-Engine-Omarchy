@@ -417,20 +417,22 @@ def best_still(directory: str, allow_preview: bool = False) -> str | None:
     return None
 
 
-def fbo_has_paint(path: str, epsilon: int = 8) -> bool:
-    """True if an LWE FBO dump is not a uniform ~0 clear.
+def fbo_paint_state(path: str, epsilon: int = 8) -> str:
+    """Classify an LWE FBO dump as painted, clear, or incomplete.
 
     LWE cannot present a first frame without a black clear. Do not use mean
     brightness — a dark wallpaper is painted. Structure = max>epsilon or
-    any channel range / stddev above the clear floor.
+    any channel range / stddev above the clear floor. Opening an image is not
+    enough to call it clear: LWE writes JPEGs in place, and their metadata can
+    be readable before a full pixel decode succeeds.
     """
     if not path or not os.path.isfile(path):
-        return False
+        return "incomplete"
     try:
         if os.path.getsize(path) < 32:
-            return False
+            return "incomplete"
     except OSError:
-        return False
+        return "incomplete"
     try:
         eps = max(0, int(epsilon))
     except (TypeError, ValueError):
@@ -444,14 +446,15 @@ def fbo_has_paint(path: str, epsilon: int = 8) -> bool:
                 im.thumbnail((128, 128))
                 st = ImageStat.Stat(im)
         except Exception:
-            return False
+            return "incomplete"
         mx = max(ch[1] for ch in st.extrema)
         mn = min(ch[0] for ch in st.extrema)
         sd = max(st.stddev) if st.stddev else 0.0
-        return mx > eps or (mx - mn) > eps or sd > 2.0
+        painted = mx > eps or (mx - mn) > eps or sd > 2.0
+        return "painted" if painted else "clear"
     identify = _which("identify")
     if not identify:
-        return False
+        return "incomplete"
     try:
         out = subprocess.check_output(
             [identify, "-format", "%[fx:maxima] %[fx:standard_deviation]\\n", path],
@@ -459,12 +462,18 @@ def fbo_has_paint(path: str, epsilon: int = 8) -> bool:
             text=True,
         ).strip().split()
         if len(out) < 2:
-            return False
+            return "incomplete"
         maxima = float(out[0])
         stddev = float(out[1])
     except Exception:
-        return False
-    return maxima > (eps / 255.0) or stddev > 0.01
+        return "incomplete"
+    painted = maxima > (eps / 255.0) or stddev > 0.01
+    return "painted" if painted else "clear"
+
+
+def fbo_has_paint(path: str, epsilon: int = 8) -> bool:
+    """Compatibility predicate for callers that only need painted/not-painted."""
+    return fbo_paint_state(path, epsilon) == "painted"
 
 
 def _load_json_arg(raw: str) -> Any:
@@ -510,6 +519,9 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("painted", help="exit 0 if LWE FBO dump has structure (not uniform ~0)")
     t.add_argument("path")
     t.add_argument("--epsilon", type=int, default=8)
+    s = sub.add_parser("paint-state", help="print painted, clear, or incomplete for an LWE FBO dump")
+    s.add_argument("path")
+    s.add_argument("--epsilon", type=int, default=8)
 
     args = p.parse_args(argv)
 
@@ -557,6 +569,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "painted":
         return 0 if fbo_has_paint(args.path, args.epsilon) else 1
+
+    if args.cmd == "paint-state":
+        print(fbo_paint_state(args.path, args.epsilon))
+        return 0
 
     return 2
 
