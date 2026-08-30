@@ -10,7 +10,7 @@ It ships a **Quickshell GUI** (`FloatingWindow`, one tab per Hyprland output), a
 
 ## Demo
 
-https://github.com/user-attachments/assets/9f422174-2342-482c-933f-12e64874916e
+https://github.com/user-attachments/assets/8a745361-9db8-40a0-b371-2725e26a6d5e
 
 Display names and resolutions are detected from each user’s Hyprland setup.
 
