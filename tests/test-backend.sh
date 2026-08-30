@@ -81,6 +81,60 @@ test_config_normalization_and_invalid_surface() {
     || fail 'repaired config was not usable on the next command'
 }
 
+test_engine_argv_coerces_covering_layers() {
+  local home="$TEST_ROOT/layer-home"
+  local config="$home/.config/omarchy/wallpaper-engine/config.json"
+  mkdir -p "$home"
+  run_we "$home" status --json >/dev/null
+  jq '.defaults.layer = "overlay" | .displays["DP-1"] = {
+      wallpaper: "1", layer: "top", scaling: "fill", fps: 30, clamp: "border"
+    }' "$config" >"$config.next"
+  mv "$config.next" "$config"
+
+  local unsafe argv layer prev tok
+  for unsafe in top overlay background; do
+    jq --arg layer "$unsafe" '.displays["DP-1"].layer = $layer | .defaults.layer = $layer' \
+      "$config" >"$config.next"
+    mv "$config.next" "$config"
+    argv=$(
+      env HOME="$home" \
+        WE_CONFIG_DIR="$home/.config/omarchy/wallpaper-engine" \
+        WE_CONFIG_FILE="$config" \
+        WE_CONFIG_LOCK="$home/.config/omarchy/wallpaper-engine/config.lock" \
+        WE_STATE_DIR="$home/.local/state/omarchy/wallpaper-engine" \
+        bash -c '
+          set -euo pipefail
+          source "$1/lib/common.sh"
+          [[ $(we_coerce_engine_layer overlay) == bottom ]]
+          [[ $(we_coerce_engine_layer top) == bottom ]]
+          [[ $(we_coerce_engine_layer background) == bottom ]]
+          [[ $(we_coerce_engine_layer bottom) == bottom ]]
+          dump_argv() {
+            local -a args=()
+            we_build_engine_argv args DP-1
+            printf "%s\n" "${args[@]}"
+          }
+          dump_argv
+        ' bash "$ROOT"
+    ) || fail "we_build_engine_argv failed for layer=$unsafe"
+
+    layer=""
+    prev=""
+    while IFS= read -r tok; do
+      if [[ $prev == --layer ]]; then
+        [[ -z $layer ]] || fail "engine argv passed --layer more than once for $unsafe"
+        layer=$tok
+      fi
+      prev=$tok
+    done <<<"$argv"
+    [[ $layer == bottom ]] \
+      || fail "engine argv used --layer ${layer:-missing} instead of bottom for saved $unsafe"
+    if grep -Fxq -- overlay <<<"$argv" || grep -Fxq -- top <<<"$argv"; then
+      fail "engine argv still contained a covering layer for saved $unsafe"
+    fi
+  done
+}
+
 test_set_defaults_rejects_wallpaper() {
   local home="$TEST_ROOT/defaults-home"
   mkdir -p "$home"
@@ -427,6 +481,7 @@ test_stop_reaps_leftover_pid_after_killed_apply() {
 
 test_canonical_paths
 test_config_normalization_and_invalid_surface
+test_engine_argv_coerces_covering_layers
 test_set_defaults_rejects_wallpaper
 test_post_boot_is_detached_and_logged
 test_post_boot_systemd_run_uses_killmode_process

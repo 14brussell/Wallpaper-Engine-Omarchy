@@ -2488,6 +2488,18 @@ we_wallpaper_property_keys_json() {
 # process-wide option from that monitor's effective config so a global default
 # can never override the display tab. Multi-monitor support remains for the
 # legacy migration path and uses the first monitor's effective settings.
+
+# Only --layer bottom is Omarchy-safe. background fights omarchy.background
+# (leave that plugin enabled); top/overlay cover windows and overlay can hide
+# the bar widget. Existing configs that stored those values are coerced here
+# so they never reach linux-wallpaperengine.
+we_coerce_engine_layer() {
+  case "${1:-bottom}" in
+    bottom) printf '%s\n' bottom ;;
+    *) printf '%s\n' bottom ;;
+  esac
+}
+
 we_build_engine_argv() {
   local -n _we_argv=$1
   shift
@@ -2500,9 +2512,7 @@ we_build_engine_argv() {
 
   local layer fps silent volume nfp pause_only_active pause_ignore_json assets
   local noautomute no_audio_processing disable_particles disable_mouse disable_parallax
-  layer=$(jq -r '.layer // "bottom"' <<<"$effective")
-  # Authoritative Omarchy guidance: never use background (fights omarchy.background).
-  [[ $layer == background ]] && layer=bottom
+  layer=$(we_coerce_engine_layer "$(jq -r '.layer // "bottom"' <<<"$effective")")
   fps=$(jq -r '.fps // 30' <<<"$effective")
   silent=$(jq -r 'if .silent == null then true else .silent end' <<<"$effective")
   volume=$(jq -r '.volume // 15' <<<"$effective")

@@ -11,6 +11,14 @@ require() {
   fi
 }
 
+forbid() {
+  local file=$1 pattern=$2 message=$3
+  if grep -Fq -- "$pattern" "$ROOT/$file"; then
+    printf 'FAIL: %s\n' "$message" >&2
+    exit 1
+  fi
+}
+
 require Panel.qml 'Accessible.role: Accessible.PageTab' \
   'display tabs must expose an accessible tab role'
 require Panel.qml 'Keys.onLeftPressed:' \
@@ -26,6 +34,15 @@ require DisplayTab.qml 'Keys.onSpacePressed: wallpaperRow.chooseWallpaper()' \
   'wallpaper rows must be keyboard selectable'
 require DisplayTab.qml 'text: "Save & apply"' \
   'Save & apply must keep a stable action label'
+require DisplayTab.qml 'readonly property var layerOptions: ["bottom"]' \
+  'GUI must not offer covering Wayland layers'
+require DisplayTab.qml '"--layer", coerceEngineLayer(engineLayer)' \
+  'Save & apply must coerce covering layers before persist'
+require DisplayTab.qml 'overlay can hide the bar' \
+  'GUI must warn that overlay can hide the bar widget'
+forbid DisplayTab.qml '["bottom", "top", "overlay"]' \
+  'GUI still lists top/overlay as selectable Wayland layers'
+
 require DisplayTab.qml 'saveApplyState: "idle"' \
   'Save & apply must expose typed feedback state'
 require DisplayTab.qml 'text: "Clear & stop"' \

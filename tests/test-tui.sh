@@ -41,6 +41,13 @@ for setting in \
   grep -Fq "$setting" "$MENU" || fail "TUI is missing setting: $setting"
 done
 
+grep -Fq 'we_coerce_engine_layer' "$MENU" \
+  || fail 'TUI does not coerce covering Wayland layers before save'
+! grep -Fq 'bottom top overlay' "$MENU" \
+  || fail 'TUI still offers top/overlay Wayland layers'
+grep -Fq 'bottom only; overlay covers the bar' "$MENU" \
+  || fail 'TUI layer chooser does not warn that overlay covers the bar'
+
 grep -Fq 'lastAppliedMonitor // empty' "$MENU" \
   || fail 'auto-match is not tied to the most recently applied wallpaper'
 grep -Fq 'if [[ $active == true ]]' "$MENU" \
