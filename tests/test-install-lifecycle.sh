@@ -137,11 +137,14 @@ test_auto_match_hint_is_concise() {
   ! grep -Fq 'else if (currentHasWallpaper)' "$ROOT/Panel.qml" \
     || fail 'auto-match still accepts a merely configured wallpaper'
   grep -A16 -F 'id: autoThemeButton' "$ROOT/Panel.qml" \
-    | grep -Fq '&& root.engineRunning' \
-    || fail 'auto-match remains enabled while Wallpaper Engine is stopped'
-  grep -A5 -F 'function toggleAutoTheme()' "$ROOT/Panel.qml" \
-    | grep -Fq 'if (!engineRunning)' \
-    || fail 'auto-match action does not reject stale clicks while the engine is stopped'
+    | grep -Fq '(root.engineRunning && root.autoThemeHasSource)' \
+    || fail 'new auto-match remains enabled while Wallpaper Engine is stopped'
+  grep -A7 -F 'function toggleAutoTheme()' "$ROOT/Panel.qml" \
+    | grep -Fq 'if (autoThemeActive)' \
+    || fail 'auto-match action cannot recover an active theme after the engine stops'
+  grep -A7 -F 'function toggleAutoTheme()' "$ROOT/Panel.qml" \
+    | grep -Fq 'else if (!engineRunning)' \
+    || fail 'new auto-match does not reject stale clicks while the engine is stopped'
 }
 
 test_save_apply_status_stays_in_button() {

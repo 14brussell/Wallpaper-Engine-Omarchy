@@ -28,6 +28,9 @@ cp -a "$user_theme"/. "$current/theme"/
 printf '%s\n' "$slug" >"$current/theme.name"
 background=$(find "$current/theme/backgrounds" -maxdepth 1 -type f | sort | head -n1)
 [[ -n $background ]] && ln -nsf "$background" "$current/background"
+if [[ -n ${WE_TEST_PLUGIN_ROOT:-} ]]; then
+  "$WE_TEST_PLUGIN_ROOT/hooks/theme-set.sh" "$slug"
+fi
 EOF
 chmod +x "$STUB_BIN/omarchy"
 
@@ -69,14 +72,17 @@ env_cmd=(
   "XDG_CONFIG_HOME=$TEST_HOME/.config"
   "XDG_STATE_HOME=$TEST_HOME/.local/state"
   "PATH=$STUB_BIN:$PATH"
+  "WE_TEST_PLUGIN_ROOT=$ROOT"
 )
 
 "${env_cmd[@]}" "$ROOT/bin/we" status --json >/dev/null
 config="$TEST_HOME/.config/omarchy/wallpaper-engine/config.json"
 tmp="$TEST_ROOT/config.tmp"
-jq '
+jq --arg saved "$TEST_HOME/.config/omarchy/themes/gruvbox/backgrounds/wallpaper.jpg" '
   .displays["DP-0"] = {wallpaper:"old-wallpaper", scaling:"fill"}
   | .displays["DP-1"] = {wallpaper:"123", scaling:"fill"}
+  | .active = true
+  | .saved_theme_background = $saved
 ' "$config" >"$tmp"
 mv "$tmp" "$config"
 
@@ -95,6 +101,9 @@ generated="$TEST_HOME/.config/omarchy/themes/wallpaper-engine-auto-match"
 jq -e '.auto_theme.active == true and .auto_theme.previous_theme == "gruvbox"
   and .auto_theme.source_monitor == "DP-1"' "$config" >/dev/null \
   || fail 'reversible auto-theme state was not recorded'
+jq -e --arg saved "$TEST_HOME/.config/omarchy/themes/gruvbox/backgrounds/wallpaper.jpg" \
+  '.saved_theme_background == $saved' "$config" >/dev/null \
+  || fail 'generated auto-theme still replaced the prior revert target'
 jq -e --arg key "$current_wallpaper_key" \
   '.auto_theme.source_image | endswith("lwe-ready.DP-1." + $key + ".123.jpg")' \
   "$config" >/dev/null \
@@ -104,9 +113,19 @@ jq -e --arg key "$current_wallpaper_key" \
     and .lastAppliedMonitor == "DP-1" and .lastAppliedWallpaper == "123"' >/dev/null \
   || fail 'status did not expose auto-theme and last-applied state'
 
+# Revert is the global "return to the desktop theme" action. When auto-match
+# is active it must restore the complete previous theme, not merely stop the
+# engine and expose the generated theme's wallpaper as a frozen-looking still.
+"${env_cmd[@]}" "$ROOT/bin/we" revert >/dev/null
+[[ $(<"$TEST_HOME/.local/state/omarchy/current/theme.name") == gruvbox ]] \
+  || fail 'revert did not restore the theme active before auto-match'
+jq -e '.auto_theme.active == false and .auto_theme.previous_theme == null' "$config" >/dev/null \
+  || fail 'revert did not clear auto-theme undo state'
+
 # Stopping the final Wallpaper Engine process must also undo auto-match. The
 # generated theme's parked background would otherwise be exposed as a blank
 # desktop after the live wallpaper disappears.
+"${env_cmd[@]}" "$ROOT/bin/we" auto-theme DP-1 >/dev/null
 "${env_cmd[@]}" "$ROOT/bin/we" stop DP-1 >/dev/null
 [[ $(<"$TEST_HOME/.local/state/omarchy/current/theme.name") == gruvbox ]] \
   || fail 'stopping Wallpaper Engine did not restore the previous theme'
@@ -120,6 +139,59 @@ jq -e '.auto_theme.active == false and .auto_theme.previous_theme == null' "$con
   || fail 'previous theme was not restored'
 jq -e '.auto_theme.active == false and .auto_theme.previous_theme == null' "$config" >/dev/null \
   || fail 'auto-theme undo state was not cleared'
+
+# Auto-match generation and revert must be a single-flight transaction. A
+# revert started while generation is blocked must run second and leave the
+# prior theme restored, never let the late auto-match commit after revert.
+generator_started="$TEST_ROOT/generator-started"
+generator_release="$TEST_ROOT/generator-release"
+generator="$TEST_ROOT/blocking-generator"
+cat >"$generator" <<'EOF'
+#!/usr/bin/env python3
+import os
+import pathlib
+import sys
+import time
+
+pathlib.Path(os.environ["WE_TEST_GENERATOR_STARTED"]).touch()
+release = pathlib.Path(os.environ["WE_TEST_GENERATOR_RELEASE"])
+for _ in range(200):
+    if release.exists():
+        break
+    time.sleep(0.01)
+else:
+    raise SystemExit(124)
+os.execv(sys.executable, [sys.executable, os.environ["WE_TEST_REAL_GENERATOR"], *sys.argv[1:]])
+EOF
+chmod +x "$generator"
+jq '.active = true' "$config" >"$tmp"
+mv "$tmp" "$config"
+"${env_cmd[@]}" \
+  "WE_THEME_GENERATOR=$generator" \
+  "WE_TEST_GENERATOR_STARTED=$generator_started" \
+  "WE_TEST_GENERATOR_RELEASE=$generator_release" \
+  "WE_TEST_REAL_GENERATOR=$ROOT/lib/generate_theme.py" \
+  "$ROOT/bin/we" auto-theme DP-1 >/dev/null &
+auto_pid=$!
+for _ in $(seq 1 200); do
+  [[ -e $generator_started ]] && break
+  sleep 0.01
+done
+[[ -e $generator_started ]] || fail 'blocking auto-theme generator did not start'
+"${env_cmd[@]}" "$ROOT/bin/we" revert >/dev/null &
+revert_pid=$!
+sleep 0.1
+kill -0 "$revert_pid" 2>/dev/null \
+  || fail 'revert bypassed an in-flight auto-theme transaction'
+: >"$generator_release"
+wait "$auto_pid" || fail 'blocked auto-theme transaction failed'
+wait "$revert_pid" || fail 'queued revert transaction failed'
+[[ $(<"$TEST_HOME/.local/state/omarchy/current/theme.name") == gruvbox ]] \
+  || fail 'late auto-match won the race against revert'
+jq -e '.active == false and .auto_theme.active == false
+  and .auto_theme.previous_theme == null and .saved_theme_background == null' \
+  "$config" >/dev/null \
+  || fail 'auto-theme/revert race left stale lifecycle state'
 
 # A normal Omarchy theme choice is also an implicit undo, even while the
 # wallpaper engine itself is stopped.

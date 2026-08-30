@@ -486,11 +486,10 @@ cmd_stop() {
 
   # The generated theme's static background is parked behind the live engine.
   # Once the last owned process stops, restore the complete prior theme instead
-  # of exposing that placeholder. Release the transition lock first because
-  # `omarchy theme set` runs our theme-set hook in a child process.
+  # of exposing that placeholder. Auto-theme undo is reentrant with this lock;
+  # its synchronous theme-set hook inherits the transaction context.
   if ! we_engine_running \
     && [[ $(we_jq -r '.auto_theme.active // false') == true ]]; then
-    we_bg_queue_leave
     we_undo_auto_theme
   fi
 }

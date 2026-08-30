@@ -550,10 +550,10 @@ Item {
 
   function revertTheme() { runWe(["revert"], "Restoring…") }
   function toggleAutoTheme() {
-    if (!engineRunning)
-      statusMessage = "Start a wallpaper before auto-matching its theme"
-    else if (autoThemeActive)
+    if (autoThemeActive)
       runWe(["undo-auto-theme"], "Restoring previous theme…")
+    else if (!engineRunning)
+      statusMessage = "Start a wallpaper before auto-matching its theme"
     else if (lastAppliedMonitor.length)
       runWe(["auto-theme"], "Matching the most recently applied wallpaper…")
     else
@@ -932,8 +932,8 @@ Item {
                 bordered: true
                 Layout.fillWidth: true
                 enabled: !actionProc.running && !root.displayBusy
-                  && root.engineRunning
-                  && (root.autoThemeActive || root.autoThemeHasSource)
+                  && (root.autoThemeActive
+                    || (root.engineRunning && root.autoThemeHasSource))
                 onClicked: root.toggleAutoTheme()
               }
 

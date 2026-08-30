@@ -54,7 +54,12 @@ we_hook_first_theme_bg() {
   return 1
 }
 
-we_bg_queue_enter
+# Auto-match and undo invoke `omarchy theme set` synchronously while already
+# holding the transition lock. Their child hook is inside the same transaction;
+# every external/manual theme change still acquires the lock normally.
+if [[ ${WE_THEME_HOOK_UNDER_BG_QUEUE:-0} != 1 ]]; then
+  we_bg_queue_enter
+fi
 we_load_config
 
 # A theme selected outside the auto-match action is itself a valid undo. Clear
@@ -78,12 +83,16 @@ else
   real_bg=$(we_hook_first_theme_bg "$THEME_SLUG" || true)
 fi
 
-existing=$(we_jq -r '.saved_theme_background // empty')
-if [[ -n $real_bg ]]; then
-  we_jq_write --arg p "$real_bg" '.saved_theme_background = $p' || true
-elif we_is_placeholder "${existing:-}" 2>/dev/null || [[ $(basename "${existing:-}") == we-placeholder.png ]]; then
-  # Drop a stale placeholder path so revert cannot restore it as the theme.
-  we_jq_write '.saved_theme_background = null' || true
+# The generated theme background resembles the live wallpaper by design; it is
+# never a valid revert target. Preserve the real pre-auto-match background.
+if [[ $THEME_SLUG != "$WE_AUTO_THEME_SLUG" ]]; then
+  existing=$(we_jq -r '.saved_theme_background // empty')
+  if [[ -n $real_bg ]]; then
+    we_jq_write --arg p "$real_bg" '.saved_theme_background = $p' || true
+  elif we_is_placeholder "${existing:-}" 2>/dev/null || [[ $(basename "${existing:-}") == we-placeholder.png ]]; then
+    # Drop a stale placeholder path so revert cannot restore it as the theme.
+    we_jq_write '.saved_theme_background = null' || true
+  fi
 fi
 
 # Re-cover the static Omarchy layer. Instant — LWE hides it. Never animated set.

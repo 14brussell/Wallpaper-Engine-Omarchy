@@ -3121,6 +3121,7 @@ we_theme_exists() {
 }
 
 we_apply_auto_theme() {
+  we_bg_queue_enter
   we_load_config
   local monitor=${1:-} current previous source stage backup old_state applied_theme
   local last_applied wallpaper_override="" preferred_source=""
@@ -3198,7 +3199,10 @@ we_apply_auto_theme() {
       source_image: $source
     }'
 
-  if ! omarchy theme set "$WE_AUTO_THEME_SLUG"; then
+  # The synchronous theme-set hook is part of this transaction. Tell our hook
+  # not to acquire transition.lock a second time while every unrelated
+  # apply/revert/stop remains excluded.
+  if ! WE_THEME_HOOK_UNDER_BG_QUEUE=1 omarchy theme set "$WE_AUTO_THEME_SLUG"; then
     applied_theme=$(we_current_theme_name)
     if [[ $applied_theme != "$WE_AUTO_THEME_SLUG" ]]; then
       we_jq_write --argjson old "$old_state" '.auto_theme = $old'
@@ -3211,8 +3215,9 @@ we_apply_auto_theme() {
 }
 
 we_undo_auto_theme() {
+  we_bg_queue_enter
   we_load_config
-  local previous
+  local previous restored_theme
   previous=$(we_jq -r '.auto_theme.previous_theme // empty')
   [[ $(we_jq -r '.auto_theme.active // false') == true && -n $previous ]] || {
     echo "No auto-matched theme change is available to undo." >&2
@@ -3226,11 +3231,20 @@ we_undo_auto_theme() {
     echo "Undo requires the Omarchy theme command." >&2
     return 1
   }
-  if ! omarchy theme set "$previous"; then
-    echo "Omarchy could not restore the previous theme: $previous" >&2
-    return 1
+  if ! WE_THEME_HOOK_UNDER_BG_QUEUE=1 omarchy theme set "$previous"; then
+    # Some Omarchy versions can report a hook failure after the theme switch
+    # has already committed. Reconcile against the actual theme before leaving
+    # auto-match stuck active.
+    restored_theme=$(we_current_theme_name)
+    if [[ $restored_theme != "$previous" ]]; then
+      echo "Omarchy could not restore the previous theme: $previous" >&2
+      return 1
+    fi
   fi
   we_jq_write '.auto_theme = {active:false, previous_theme:null, source_monitor:null}'
+  if ! we_engine_running; then
+    we_jq_write '.saved_theme_background = null'
+  fi
   we_notify "Restored theme $previous"
   echo "Restored Omarchy theme: $previous"
 }
@@ -3239,11 +3253,28 @@ we_revert_to_theme() {
   we_bg_queue_enter
   we_load_config
   we_ensure_omarchy_background_enabled
-  local target rc=0
+  local target rc=0 auto_active
+  auto_active=$(we_jq -r '.auto_theme.active // false')
   target=$(we_revert_target_image 2>/dev/null || true)
   we_stop_engine
   we_jq_write '.active = false'
   we_set_active_flag false
+
+  # Auto-match changes the complete Omarchy theme. Restoring only its generated
+  # background makes the stopped live wallpaper look frozen and leaves colors,
+  # fonts, and the recorded theme wrong. Undo the full theme while retaining
+  # this transaction lock; our synchronous hook inherits the lock context.
+  if [[ $auto_active == true ]]; then
+    if ! we_undo_auto_theme; then
+      we_clear_last_reveal
+      we_prune_transition_history
+      return 1
+    fi
+    we_clear_last_reveal
+    we_prune_transition_history
+    return 0
+  fi
+
   if [[ -z $target || ! -f $target ]]; then
     echo "Could not find a theme background to restore." >&2
     return 1
