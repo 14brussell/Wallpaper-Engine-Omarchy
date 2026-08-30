@@ -71,9 +71,21 @@ if [[ $auto_active == true && $THEME_SLUG != "$WE_AUTO_THEME_SLUG" \
 fi
 
 active=$(we_jq -r '.active // false')
+if we_install_lock_held; then
+  # install.sh still swapping/hooking. Do not treat Omarchy's theme refresh as
+  # a session stop (that restored the theme ~45s after a successful apply).
+  if [[ $active == true ]] || we_engine_running; then
+    we_apply_placeholder || true
+  fi
+  exit 0
+fi
 if ! we_engine_running; then
-  [[ $active != true ]] || we_jq_write '.active = false' || true
-  we_set_active_flag false || true
+  # A Hyprland reload can hide engines for a moment. Clearing .active here
+  # permanently restored the Omarchy theme after apply. Leave stop/revert
+  # to own that write. Re-park the placeholder if this session is still live.
+  if [[ $active == true ]]; then
+    we_apply_placeholder || true
+  fi
   exit 0
 fi
 if [[ $active != true ]]; then

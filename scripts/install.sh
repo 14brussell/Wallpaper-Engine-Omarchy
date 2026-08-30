@@ -287,13 +287,26 @@ EOF
 
 # Refuse to swap code while an apply/revert transaction owns the same plugin.
 refuse_legacy_install
+INSTALL_LOCK="$(dirname -- "$DEST")/.${PLUGIN_ID}.install.lock"
+install_lock_acquired=0
+release_install_lock() {
+  (( install_lock_acquired )) || return 0
+  install_lock_acquired=0
+  rm -f -- "$INSTALL_LOCK"
+}
+trap release_install_lock EXIT
 mkdir -p "$(dirname -- "$DEST")" "$HOME/.local/state/omarchy/wallpaper-engine"
-exec 8>"$(dirname -- "$DEST")/.${PLUGIN_ID}.install.lock"
+exec 8>"$INSTALL_LOCK"
 flock -w 5 8 || { echo "Another plugin install is already running." >&2; exit 1; }
+install_lock_acquired=1
 exec 7>"$HOME/.local/state/omarchy/wallpaper-engine/transition.lock"
 flock -w 2 7 || { echo "Wallpaper transition is active; retry the install when it finishes." >&2; exit 1; }
 
 sync_plugin_tree "$SOURCE" "$DEST"
+# Drop the queue lock after the tree swap. Holding it through hook install made
+# children inherit the flock and let theme-set/apply race the new tree.
+flock -u 7 2>/dev/null || true
+exec 7>&-
 ROOT=$DEST
 
 set_tree_modes "$ROOT"

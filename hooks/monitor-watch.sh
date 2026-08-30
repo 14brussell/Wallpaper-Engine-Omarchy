@@ -36,15 +36,24 @@ watch_pid_live() {
   kill -0 -- "$pid" 2>/dev/null
 }
 
+unit_is_running() {
+  command -v systemctl >/dev/null 2>&1 \
+    && systemctl --user is-active --quiet "$WE_MONITOR_WATCH_UNIT" 2>/dev/null
+}
+
+watch_already_running() {
+  unit_is_running || watch_pid_live
+}
+
 cmd_ensure() {
   [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || return 0
   we_ensure_dirs
+  : >>"$WE_MONITOR_WATCH_LOG"
 
-  if command -v systemctl >/dev/null 2>&1 \
-    && systemctl --user is-active --quiet "$WE_MONITOR_WATCH_UNIT" 2>/dev/null; then
-    return 0
-  fi
-  if watch_pid_live; then
+  # Singleton: never systemd-run (or setsid) a second --loop. A failed
+  # systemd-run while the unit is already starting used to fall through to
+  # setsid and overlap PIDs. Exec stays HOOK_PATH (plugin dir when installed).
+  if watch_already_running; then
     return 0
   fi
 
@@ -58,6 +67,22 @@ cmd_ensure() {
       "$HOOK_PATH" --loop 9>&-; then
       return 0
     fi
+    # Lost the start race, or the unit name is already taken: do not setsid.
+    if watch_already_running; then
+      return 0
+    fi
+    if command -v systemctl >/dev/null 2>&1 \
+      && systemctl --user is-failed --quiet "$WE_MONITOR_WATCH_UNIT" 2>/dev/null; then
+      :
+    elif command -v systemctl >/dev/null 2>&1 \
+      && systemctl --user show -p LoadState --value "$WE_MONITOR_WATCH_UNIT" 2>/dev/null \
+        | grep -qx loaded; then
+      return 0
+    fi
+  fi
+
+  if watch_already_running; then
+    return 0
   fi
 
   if command -v setsid >/dev/null 2>&1; then
@@ -80,12 +105,21 @@ kick_reconcile() {
 }
 
 cmd_loop() {
+  local socket debounce_pid="" existing
   we_ensure_dirs
   : >>"$WE_MONITOR_WATCH_LOG"
+  if watch_pid_live; then
+    existing=$(<"$WE_MONITOR_WATCH_PID_FILE")
+    if [[ $existing != "$$" ]]; then
+      printf 'monitor-watch already running pid=%s; exiting\n' "$existing" \
+        >>"$WE_MONITOR_WATCH_LOG"
+      exit 0
+    fi
+  fi
   printf '%s\n' "$$" >"$WE_MONITOR_WATCH_PID_FILE"
+  printf 'monitor-watch loop start pid=%s root=%s\n' "$$" "$ROOT" \
+    >>"$WE_MONITOR_WATCH_LOG"
   trap 'rm -f -- "$WE_MONITOR_WATCH_PID_FILE"' EXIT
-
-  local socket debounce_pid=""
   while true; do
     socket=$(hyprland_socket || true)
     if [[ -z $socket || ! -S $socket ]]; then
@@ -102,7 +136,9 @@ cmd_loop() {
 
     while read -r event; do
       case "$event" in
-        monitoradded\>\>*|monitoraddedv2\>\>*|monitorremoved\>\>*|monitorremovedv2\>\>*|configreloaded\>\>*)
+        # configreloaded is hyprctl reload (omarchy-theme-set). Reconciling
+        # then can see zero heads and SIGTERM every engine.
+        monitoradded\>\>*|monitoraddedv2\>\>*|monitorremoved\>\>*|monitorremovedv2\>\>*)
           kick_reconcile
           ;;
       esac

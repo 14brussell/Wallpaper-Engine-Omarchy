@@ -534,6 +534,7 @@ test_in_place_install_is_staged_and_generation_stamped() {
     XDG_STATE_HOME="$TEST_ROOT/in-place-wrong-state" \
     WE_SKIP_MENU_REFRESH=1 \
     "$dest/scripts/install.sh" >"$output" 2>&1
+  assert_absent "$(dirname -- "$dest")/.${PLUGIN_ID}.install.lock"
   grep -Fq "omarchy plugin update $PLUGIN_ID" "$output" \
     || fail 'git checkout install did not print the plugin update path'
   ! grep -Fq 'omarchy plugin update will not work' "$output" \
@@ -615,6 +616,7 @@ test_copy_install_prints_reinstall_recipe() {
     "$ROOT/scripts/install.sh" >"$output" 2>&1
 
   assert_exists "$dest/scripts/install.sh"
+  assert_absent "$(dirname -- "$dest")/.${PLUGIN_ID}.install.lock"
   [[ ! -e $dest/.git ]] \
     || fail 'copy install left a .git directory at dest'
   grep -Fq 'omarchy plugin update will not work' "$output" \

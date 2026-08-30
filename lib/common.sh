@@ -25,9 +25,26 @@ WE_AUTO_THEME_DIR="${WE_AUTO_THEME_DIR:-$WE_USER_THEMES_DIR/$WE_AUTO_THEME_SLUG}
 WE_BG_WAS_DISABLED_FLAG="$WE_STATE_DIR/disabled-omarchy-background"
 WE_TRANSITION_DIR="${WE_TRANSITION_DIR:-$WE_STATE_DIR/transitions}"
 WE_BG_QUEUE_LOCK="${WE_BG_QUEUE_LOCK:-$WE_STATE_DIR/transition.lock}"
+WE_INSTALL_LOCK="${WE_INSTALL_LOCK:-$HOME/.config/omarchy/plugins/.io.github.14brussell.wallpaper-engine.install.lock}"
 
 WE_APPID="${WE_APPID:-431960}"
 WE_ENGINE_BIN="${WE_ENGINE_BIN:-linux-wallpaperengine}"
+
+# True while scripts/install.sh holds an exclusive flock on the install lock.
+# File presence alone is not enough: a leftover 0-byte lock is not "in progress".
+we_install_lock_held() {
+  local lock=${WE_INSTALL_LOCK:-} fd
+  lock=${lock:-$HOME/.config/omarchy/plugins/.io.github.14brussell.wallpaper-engine.install.lock}
+  [[ -e $lock ]] || return 1
+  exec {fd}<>"$lock" || return 1
+  if flock -n "$fd"; then
+    flock -u "$fd" 2>/dev/null || true
+    eval "exec ${fd}>&-"
+    return 1
+  fi
+  eval "exec ${fd}>&-"
+  return 0
+}
 
 we_ensure_dirs() {
   mkdir -p "$WE_CONFIG_DIR" "$WE_STATE_DIR" "$WE_PID_DIR" "$WE_TRANSITION_DIR"
@@ -764,6 +781,19 @@ we_reconcile_live_outputs() {
   local -a live=() configured=() to_start=()
   local m key f identity pid_file matched live_name
   mapfile -t live < <(we_live_monitor_names)
+  # hyprctl reload (omarchy-theme-set) can report zero heads for a beat.
+  # Treating that as "every output vanished" SIGTERMs live engines and lets
+  # the theme-set hook record active=false. Skip until hyprctl is coherent.
+  local has_live=0
+  for m in "${live[@]}"; do
+    [[ -n $m ]] || continue
+    has_live=1
+    break
+  done
+  if (( ! has_live )); then
+    we_runtime_log "output reconcile skipped: no live hyprctl outputs"
+    return 0
+  fi
   mapfile -t configured < <(we_configured_monitors)
 
   we_bg_queue_enter || {

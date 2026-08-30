@@ -40,6 +40,10 @@ fi
 # stopped, so a later apply can hotplug without a second login.
 "$ROOT/hooks/monitor-watch.sh" --ensure || true
 
+if we_install_lock_held; then
+  exit 0
+fi
+
 we_load_config
 
 active=$(we_jq -r '.active // false')

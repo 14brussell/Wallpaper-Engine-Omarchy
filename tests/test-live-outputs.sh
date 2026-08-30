@@ -166,6 +166,17 @@ test_hotplug_start_and_stop() {
   [[ ! -s $start_log ]] || fail 'inactive session still started engines on hotplug'
 }
 
+test_empty_live_outputs_do_not_stop_engines() {
+  seed_two_displays
+  we_ensure_dirs
+  local pid_file
+  pid_file=$(we_monitor_pid_file DP-1)
+  printf '99999 1\n' >"$pid_file"
+  install_hyprctl '[]'
+  we_reconcile_live_outputs
+  [[ -f $pid_file ]] || fail 'empty live list removed the engine pid file'
+}
+
 test_monitor_watch_ensure_is_noop_without_hyprland() {
   local started elapsed
   started=$(we_now_ms)
@@ -174,11 +185,19 @@ test_monitor_watch_ensure_is_noop_without_hyprland() {
   (( elapsed < 1000 )) || fail "--ensure blocked ${elapsed}ms without Hyprland"
 }
 
+test_monitor_watch_ignores_config_reload() {
+  if grep -E 'configreloaded\\>\\>\*' "$ROOT/hooks/monitor-watch.sh"; then
+    fail 'monitor-watch still reconciles on hyprctl configreloaded'
+  fi
+}
+
 test_configured_but_not_live_is_skipped
 test_all_disconnected_skips_without_clearing_active
+test_empty_live_outputs_do_not_stop_engines
 test_disabled_hyprctl_head_is_not_live
 test_named_apply_rejects_disconnected
 test_hotplug_start_and_stop
 test_monitor_watch_ensure_is_noop_without_hyprland
+test_monitor_watch_ignores_config_reload
 
 echo 'live-output regression tests: PASS'
