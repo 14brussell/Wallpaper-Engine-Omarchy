@@ -12,15 +12,14 @@ if [[ -f $ROOT/manifest.json ]]; then
   [[ -n ${manifest_id:-} ]] && PLUGIN_ID=$manifest_id
 fi
 
-HOOKS_ROOT="${WE_HOOKS_ROOT:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/hooks}"
-MENU_FILE="${WE_MENU_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/extensions/omarchy-menu.jsonc}"
+HOOKS_ROOT="${WE_HOOKS_ROOT:-$HOME/.config/omarchy/hooks}"
+MENU_FILE="${WE_MENU_FILE:-$HOME/.config/omarchy/extensions/omarchy-menu.jsonc}"
 BIN_DIR="${WE_BIN_DIR:-$HOME/.local/bin}"
-CONFIG_DIR="${WE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/wallpaper-engine}"
-STATE_DIR="${WE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/wallpaper-engine}"
-AUTO_THEME_DIR="${WE_AUTO_THEME_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/themes/wallpaper-engine-auto-match}"
+CONFIG_DIR="${WE_CONFIG_DIR:-$HOME/.config/omarchy/wallpaper-engine}"
+STATE_DIR="${WE_STATE_DIR:-$HOME/.local/state/omarchy/wallpaper-engine}"
+AUTO_THEME_DIR="${WE_AUTO_THEME_DIR:-$HOME/.config/omarchy/themes/wallpaper-engine-auto-match}"
 CONTROLLER="${WE_CONTROLLER:-$ROOT/bin/we}"
 HOOK_MARKER="# wallpaper-engine-omarchy"
-MENU_MARKER="  // Added by wallpaper-engine-omarchy"
 
 usage() {
   cat <<'EOF'
@@ -56,25 +55,30 @@ run_controller() {
 }
 
 restore_background_and_stop() {
+  local safe=1
   if [[ -f $CONFIG_DIR/config.json ]] \
     && jq -e '.auto_theme.active == true' "$CONFIG_DIR/config.json" >/dev/null 2>&1; then
     if run_controller undo-auto-theme; then
       echo "Restored the theme selected before wallpaper auto-match."
     else
       echo "Could not restore the theme selected before wallpaper auto-match." >&2
+      safe=0
     fi
   fi
   if run_controller revert; then
     echo "Stopped Wallpaper Engine and restored the Omarchy theme background."
-    return 0
+    (( safe ))
+    return
   fi
 
   echo "Could not fully restore the theme background; attempting a safe stop." >&2
   if run_controller stop; then
     echo "Stopped Wallpaper Engine. Restore your theme background manually if needed."
   else
-    echo "Could not confirm that Wallpaper Engine stopped; continuing with integration cleanup." >&2
+    echo "Could not confirm that Wallpaper Engine stopped." >&2
+    safe=0
   fi
+  (( safe ))
 }
 
 hook_is_owned() {
@@ -95,44 +99,10 @@ remove_owned_hook() {
   fi
 }
 
-menu_line_is_owned() {
-  local line=$1
-  local key_pattern='^[[:space:]]*"(appearance\.wallpaper-engine[^"]*|style\.wallpaper-engine([.-](revert|tui))?)"[[:space:]]*:'
-  [[ $line =~ $key_pattern ]] || return 1
-
-  [[ $line == *"omarchy-shell shell summon $PLUGIN_ID"* \
-    || $line == *"omarchy-shell shell summon wallpaper-engine-omarchy"* \
-    || $line == *'/bin/we revert'* \
-    || $line == *'/scripts/we-menu'* ]]
-}
-
 remove_owned_menu_entries() {
   [[ -f $MENU_FILE ]] || return 0
-
-  local line tmp removed=0 marker_removed=0
-  tmp=$(mktemp "${MENU_FILE}.tmp.XXXXXX")
-  while IFS= read -r line || [[ -n $line ]]; do
-    if menu_line_is_owned "$line"; then
-      removed=$((removed + 1))
-      continue
-    fi
-    if [[ $line == "$MENU_MARKER" ]]; then
-      marker_removed=1
-      continue
-    fi
-    printf '%s\n' "$line"
-  done <"$MENU_FILE" >"$tmp"
-
-  if (( removed || marker_removed )); then
-    mv -f -- "$tmp" "$MENU_FILE"
-    printf 'Removed %d plugin-owned menu entr%s from %s\n' \
-      "$removed" "$([[ $removed == 1 ]] && printf y || printf ies)" "$MENU_FILE"
-    if [[ ${WE_SKIP_MENU_REFRESH:-0} != 1 ]] && command -v omarchy-shell >/dev/null 2>&1; then
-      timeout -k 1 3 omarchy-shell shell call omarchy.menu refresh "" >/dev/null 2>&1 || true
-    fi
-  else
-    rm -f -- "$tmp"
-  fi
+  WE_MENU_FILE=$MENU_FILE WE_SKIP_MENU_REFRESH=${WE_SKIP_MENU_REFRESH:-0} \
+    "$ROOT/scripts/we-menu-entry" remove
 }
 
 symlink_target_is_owned() {
@@ -210,6 +180,14 @@ purge_plugin_data() {
   fi
 }
 
+validate_purge_paths() {
+  validate_purge_data_dir "$CONFIG_DIR" configuration
+  if [[ $STATE_DIR != "$CONFIG_DIR" ]]; then
+    validate_purge_data_dir "$STATE_DIR" 'runtime state'
+  fi
+  validate_auto_theme_dir "$AUTO_THEME_DIR"
+}
+
 main() {
   local purge=0
   case ${1:-} in
@@ -219,7 +197,18 @@ main() {
     *) usage >&2; return 2 ;;
   esac
 
-  restore_background_and_stop
+  # Validate every destructive target before stopping anything or removing any
+  # integration, so a bad override cannot leave a half-uninstalled plugin.
+  (( purge )) && validate_purge_paths
+
+  if ! restore_background_and_stop; then
+    if (( purge )); then
+      echo "Purge cancelled: runtime shutdown/restoration could not be confirmed." >&2
+      echo "Configuration, runtime state, hooks, menu entries, and command links were preserved." >&2
+      return 1
+    fi
+    echo "Runtime shutdown/restoration was not confirmed; removing integrations without purging data." >&2
+  fi
 
   remove_owned_hook "$HOOKS_ROOT/post-boot.d/50-wallpaper-engine"
   remove_owned_hook "$HOOKS_ROOT/theme-set.d/50-wallpaper-engine"

@@ -16,9 +16,9 @@ if [[ -f $SOURCE/manifest.json ]]; then
   _id=$(sed -n 's/^[[:space:]]*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SOURCE/manifest.json" | head -n1)
   [[ -n ${_id:-} ]] && PLUGIN_ID=$_id
 fi
-DEST="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/${PLUGIN_ID}"
+DEST="$HOME/.config/omarchy/plugins/${PLUGIN_ID}"
 LEGACY_PLUGIN_ID="wallpaper-engine-omarchy"
-LEGACY_DEST="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/${LEGACY_PLUGIN_ID}"
+LEGACY_DEST="$HOME/.config/omarchy/plugins/${LEGACY_PLUGIN_ID}"
 
 refuse_legacy_install() {
   [[ $PLUGIN_ID != "$LEGACY_PLUGIN_ID" ]] || return 0
@@ -71,7 +71,7 @@ set_tree_modes() {
 }
 
 validate_stage() {
-  local root=$1 f qml_lint=""
+  local root=$1 f qml_lint="" lint_json=""
   jq -e --arg id "$PLUGIN_ID" '.id == $id and (.entryPoints | type == "object")' \
     "$root/manifest.json" >/dev/null
   for f in "$root"/bin/we "$root"/lib/common.sh "$root"/scripts/* "$root"/hooks/*.sh; do
@@ -89,7 +89,29 @@ validate_stage() {
     qml_lint=/usr/lib/qt6/bin/qmllint
   fi
   if [[ -n $qml_lint ]]; then
-    "$qml_lint" "$root"/*.qml >/dev/null 2>&1
+    # qmllint reports many false-positive semantic warnings for plugins because
+    # Omarchy injects their host types and context at runtime. Its default exit
+    # code also ignores those warnings, so a silent rc=0 is not validation.
+    # Ask for machine-readable diagnostics and explicitly reject parser errors;
+    # the supported Omarchy validator below owns manifest/entry-point checks.
+    lint_json=$(mktemp "$root/.qmllint.XXXXXX.json")
+    if ! "$qml_lint" --json "$lint_json" "$root"/*.qml >/dev/null 2>&1; then
+      if ! jq -e '[.files[].warnings[]? | select(.id == "syntax")] | length == 0' \
+        "$lint_json" >/dev/null 2>&1; then
+        jq -r '.files[].warnings[]? | select(.id == "syntax")
+          | "\(.filename):\(.line):\(.column): \(.message)"' "$lint_json" >&2
+        rm -f -- "$lint_json"
+        return 1
+      fi
+    fi
+    if ! jq -e '[.files[].warnings[]? | select(.id == "syntax")] | length == 0' \
+      "$lint_json" >/dev/null 2>&1; then
+      jq -r '.files[].warnings[]? | select(.id == "syntax")
+        | "\(.filename):\(.line):\(.column): \(.message)"' "$lint_json" >&2
+      rm -f -- "$lint_json"
+      return 1
+    fi
+    rm -f -- "$lint_json"
   fi
   if command -v omarchy-plugin-validate >/dev/null 2>&1; then
     omarchy-plugin-validate "$root" >/dev/null
@@ -105,15 +127,6 @@ sync_plugin_tree() {
   parent=$(dirname -- "$dest")
   mkdir -p "$parent"
 
-  if [[ ! -L $dest && -d $dest ]]; then
-    local dest_phys src_phys
-    dest_phys=$(cd "$dest" && pwd -P)
-    src_phys=$(cd "$src" && pwd -P)
-    if [[ $dest_phys == "$dest" && $src_phys == "$dest_phys" ]]; then
-      return 0
-    fi
-  fi
-
   # Hidden siblings are ignored by Omarchy's recursive plugin watcher. Build
   # and validate the complete replacement there, then expose one atomic move.
   stage=$(mktemp -d "$parent/.${PLUGIN_ID}.stage.XXXXXX")
@@ -121,11 +134,14 @@ sync_plugin_tree() {
   generation="$(date +%s%N)-$$-$RANDOM"
   sed -i "s/__WE_BUILD_GENERATION__/$generation/g" "$stage/Service.qml"
   set_tree_modes "$stage"
-  validate_stage "$stage"
+  if ! validate_stage "$stage"; then
+    rm -rf -- "$stage"
+    return 1
+  fi
 
   # Decide from durable shell configuration, not old IPC responsiveness. A
   # wedged old service is precisely when rollback protection matters most.
-  shell_config="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
+  shell_config="$HOME/.config/omarchy/shell.json"
   if [[ -f $shell_config ]] \
     && jq -e --arg id "$PLUGIN_ID" \
       '((.disabledPlugins // []) | index($id) == null)
@@ -216,10 +232,10 @@ sync_plugin_tree() {
 
 # Refuse to swap code while an apply/revert transaction owns the same plugin.
 refuse_legacy_install
-mkdir -p "$(dirname -- "$DEST")" "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/wallpaper-engine"
+mkdir -p "$(dirname -- "$DEST")" "$HOME/.local/state/omarchy/wallpaper-engine"
 exec 8>"$(dirname -- "$DEST")/.${PLUGIN_ID}.install.lock"
 flock -w 5 8 || { echo "Another plugin install is already running." >&2; exit 1; }
-exec 7>"${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/wallpaper-engine/transition.lock"
+exec 7>"$HOME/.local/state/omarchy/wallpaper-engine/transition.lock"
 flock -w 2 7 || { echo "Wallpaper transition is active; retry the install when it finishes." >&2; exit 1; }
 
 sync_plugin_tree "$SOURCE" "$DEST"

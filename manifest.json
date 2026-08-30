@@ -7,7 +7,6 @@
   "license": "MIT",
   "description": "Steam Wallpaper Engine backgrounds on Omarchy/Hyprland with per-display controls, reversible wallpaper-matched themes, Workshop browse, and theme restore.",
   "kinds": ["bar-widget", "panel", "service"],
-  "keepLoaded": true,
   "entryPoints": {
     "barWidget": "BarWidget.qml",
     "panel": "Panel.qml",

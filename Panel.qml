@@ -49,6 +49,9 @@ Item {
   property var wallpaperDirsDraft: []
   property string wallpaperDirsError: ""
   property int currentTabIndex: 0
+  property var dirtyDisplays: []
+  property string pendingDiscardAction: ""
+  property int pendingTabIndex: -1
 
   readonly property string pluginRoot: {
     var url = Qt.resolvedUrl(".")
@@ -104,6 +107,110 @@ Item {
     return statusMessage
   }
   readonly property bool progressIsBusy: busyAction.length > 0 || displayBusy
+  readonly property bool progressIsError: !progressIsBusy && /failed|could not|timed out|missing|error/i.test(progressText)
+
+  function boundedMessage(value, fallback) {
+    var text = root.asJsString(value || fallback || "").replace(/[\r\n]+/g, " ").trim()
+    if (text.length > 180)
+      text = text.slice(0, 177) + "…"
+    return text
+  }
+
+  function refreshDirtyDisplays() {
+    var next = []
+    for (var i = 0; i < root.displayCount; i++) {
+      var item = tabRepeater.itemAt(i)
+      if (item && item.draftDirty)
+        next.push(root.labelAt(root.monitorNames, i))
+    }
+    dirtyDisplays = next
+  }
+
+  function currentDisplayTab() {
+    if (root.displayCount === 0) return null
+    return tabRepeater.itemAt(Math.max(0, Math.min(root.currentTabIndex, root.displayCount - 1)))
+  }
+
+  function requestTabSelection(index) {
+    var next = Math.max(0, Math.min(Number(index) || 0, root.displayCount - 1))
+    if (next === root.currentTabIndex) return true
+    var current = root.currentDisplayTab()
+    if (current && current.draftDirty) {
+      pendingTabIndex = next
+      pendingDiscardAction = "tab"
+      discardChangesPopup.open()
+      return false
+    }
+    selectTab(next, true)
+    return true
+  }
+
+  function hasUnsavedChanges() {
+    root.refreshDirtyDisplays()
+    return root.dirtyDisplays.length > 0 || (wallpaperDirsPopup.opened && root.wallpaperDirsDirty)
+  }
+
+  function requestDismiss() {
+    if (root.hasUnsavedChanges()) {
+      pendingDiscardAction = "close"
+      discardChangesPopup.open()
+      return
+    }
+    dismissNow()
+  }
+
+  function dismissNow() {
+    try {
+      if (shell && typeof shell.hide === "function")
+        shell.hide((manifest && manifest.id) || "io.github.14brussell.wallpaper-engine")
+      else
+        close()
+    } catch (e) {
+      close()
+    }
+  }
+
+  function requestCloseWallpaperFolders() {
+    if (root.savingWallpaperDirs) return
+    if (root.wallpaperDirsDirty) {
+      pendingDiscardAction = "folders"
+      discardChangesPopup.open()
+      return
+    }
+    wallpaperDirsPopup.close()
+  }
+
+  function confirmDiscardChanges() {
+    var action = pendingDiscardAction
+    discardChangesPopup.close()
+    pendingDiscardAction = ""
+    if (action === "tab") {
+      var current = root.currentDisplayTab()
+      if (current) current.draftDirty = false
+      root.refreshDirtyDisplays()
+      var next = pendingTabIndex
+      pendingTabIndex = -1
+      root.selectTab(next, true)
+      Qt.callLater(function() {
+        var tab = tabButtonRepeater.itemAt(next)
+        if (tab) tab.forceActiveFocus(Qt.TabFocusReason)
+      })
+    } else if (action === "folders") {
+      wallpaperDirsDraft = extraWallpaperDirs ? extraWallpaperDirs.slice(0) : []
+      folderPathField.text = ""
+      wallpaperDirsError = ""
+      wallpaperDirsPopup.close()
+    } else if (action === "close") {
+      for (var i = 0; i < root.displayCount; i++) {
+        var item = tabRepeater.itemAt(i)
+        if (item) item.draftDirty = false
+      }
+      wallpaperDirsDraft = extraWallpaperDirs ? extraWallpaperDirs.slice(0) : []
+      folderPathField.text = ""
+      root.refreshDirtyDisplays()
+      root.dismissNow()
+    }
+  }
 
   // Force a real JS string primitive (never String(object) → [object V4…]).
   function asJsString(value) {
@@ -440,14 +547,7 @@ Item {
   }
 
   function dismiss() {
-    try {
-      if (shell && typeof shell.hide === "function")
-        shell.hide((manifest && manifest.id) || "io.github.14brussell.wallpaper-engine")
-      else
-        close()
-    } catch (e) {
-      close()
-    }
+    requestDismiss()
   }
 
   function refresh(soft) {
@@ -524,7 +624,7 @@ Item {
       if (!statusMessage.length)
         statusMessage = "Done"
     } else {
-      var first = err.length ? err.split("\n")[0] : ""
+      var first = err.length ? root.boundedMessage(err.split("\n")[0], "") : ""
       if (/Missing dependency:.*linux-wallpaperengine/i.test(first)
           || /linux-wallpaperengine-git/i.test(err)) {
         statusMessage = first + " — run: we doctor"
@@ -792,10 +892,8 @@ Item {
   FileView {
     id: activeFlag
     path: {
-      var state = Quickshell.env("XDG_STATE_HOME")
       var home = Quickshell.env("HOME")
-      var base = (state && state.length) ? state : (home + "/.local/state")
-      return base + "/omarchy/wallpaper-engine/active"
+      return home + "/.local/state/omarchy/wallpaper-engine/active"
     }
     watchChanges: true
     onFileChanged: if (root.opened) root.refresh(true)
@@ -822,8 +920,17 @@ Item {
     minimumSize: Qt.size(Style.space(720), Style.space(480))
 
     onVisibleChanged: {
-      if (!visible && root.opened && !root.closingFromHost)
-        root.dismiss()
+      if (!visible && root.opened && !root.closingFromHost) {
+        if (root.hasUnsavedChanges()) {
+          // A compositor close must not silently throw drafts away. Re-open the
+          // surface long enough to ask for an explicit discard.
+          visible = true
+          root.pendingDiscardAction = "close"
+          discardChangesPopup.open()
+        } else {
+          root.dismissNow()
+        }
+      }
     }
 
     FocusScope {
@@ -910,6 +1017,9 @@ Item {
                 tooltipText: "Close"
                 foreground: root.fg
                 fontFamily: root.fontFamily
+                focusable: true
+                Accessible.role: Accessible.Button
+                Accessible.name: "Close Wallpaper Engine panel"
                 onClicked: root.dismiss()
               }
             }
@@ -930,6 +1040,9 @@ Item {
                 accent: Color.accent
                 active: root.autoThemeActive
                 bordered: true
+                focusable: true
+                Accessible.role: Accessible.Button
+                Accessible.name: text
                 Layout.fillWidth: true
                 enabled: !actionProc.running && !root.displayBusy
                   && (root.autoThemeActive
@@ -944,6 +1057,9 @@ Item {
                 accent: Color.accent
                 active: root.engineRunning || root.active || root.hasConfiguredDisplays
                 bordered: true
+                focusable: true
+                Accessible.role: Accessible.Button
+                Accessible.name: "Revert wallpaper theme changes"
                 enabled: !actionProc.running && !root.displayBusy
                 Layout.fillWidth: true
                 onClicked: root.revertTheme()
@@ -954,6 +1070,9 @@ Item {
                 tooltipText: "Refresh status"
                 foreground: root.fg
                 fontFamily: root.fontFamily
+                focusable: true
+                Accessible.role: Accessible.Button
+                Accessible.name: "Refresh Wallpaper Engine status"
                 enabled: !statusProc.running
                 onClicked: root.refresh()
               }
@@ -975,11 +1094,17 @@ Item {
               textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: root.progressText.length > 0
-              text: root.progressText
-              color: root.progressIsBusy ? Color.accent : root.dim
+              text: root.boundedMessage(root.progressText, "")
+              color: root.progressIsError
+                ? Color.urgent
+                : (root.progressIsBusy ? Color.accent : root.dim)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
+              font.bold: root.progressIsError
               wrapMode: Text.WordWrap
+              Accessible.role: Accessible.StaticText
+              Accessible.name: (root.progressIsError ? "Error: " : "") + text
+              Accessible.description: "Wallpaper Engine action status"
             }
           }
         }
@@ -1038,6 +1163,7 @@ Item {
                 spacing: 0
 
                 Repeater {
+                  id: tabButtonRepeater
                   // Integer model — never pass monitor objects as modelData.
                   model: root.displayCount
 
@@ -1056,9 +1182,32 @@ Item {
                       if (t.length) return t
                       return root.labelAt(root.monitorNames, index)
                     }
+                    readonly property bool dirty: root.dirtyDisplays.indexOf(displayName) >= 0
 
                     width: tabRow.width / Math.max(1, root.displayCount)
                     height: tabRow.height
+                    activeFocusOnTab: true
+                    Accessible.role: Accessible.PageTab
+                    Accessible.name: titleText + (dirty ? ", unsaved changes" : "")
+                    Accessible.selected: selected
+                    Accessible.focusable: true
+                    Keys.onReturnPressed: root.requestTabSelection(index)
+                    Keys.onEnterPressed: root.requestTabSelection(index)
+                    Keys.onSpacePressed: root.requestTabSelection(index)
+                    Keys.onLeftPressed: {
+                      var next = (index - 1 + root.displayCount) % root.displayCount
+                      if (root.requestTabSelection(next)) {
+                        var item = tabButtonRepeater.itemAt(next)
+                        if (item) item.forceActiveFocus(Qt.TabFocusReason)
+                      }
+                    }
+                    Keys.onRightPressed: {
+                      var next = (index + 1) % root.displayCount
+                      if (root.requestTabSelection(next)) {
+                        var item = tabButtonRepeater.itemAt(next)
+                        if (item) item.forceActiveFocus(Qt.TabFocusReason)
+                      }
+                    }
 
                   Rectangle {
                     anchors.fill: parent
@@ -1066,14 +1215,16 @@ Item {
                     // to the content pane; round the top like a notebook tab.
                     radius: Math.max(2, Style.cornerRadius - 2)
                     color: {
+                      if (tabDelegate.activeFocus)
+                        return Style.focusFillFor(root.fg, Color.accent)
                       if (tabDelegate.selected)
                         return Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.28)
                       if (tabDelegate.hovered)
                         return Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.12)
                       return "transparent"
                     }
-                    border.width: tabDelegate.selected ? 1 : 0
-                    border.color: tabDelegate.selected
+                    border.width: tabDelegate.selected || tabDelegate.activeFocus ? 1 : 0
+                    border.color: tabDelegate.selected || tabDelegate.activeFocus
                       ? Color.accent
                       : "transparent"
                   }
@@ -1098,7 +1249,7 @@ Item {
                     Text {
                       textFormat: Text.PlainText
                       Layout.fillWidth: true
-                      text: tabDelegate.titleText
+                      text: tabDelegate.titleText + (tabDelegate.dirty ? " •" : "")
                       color: tabDelegate.selected
                         ? root.fg
                         : (tabDelegate.hovered ? root.fg : root.dim)
@@ -1146,7 +1297,10 @@ Item {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.selectTab(tabDelegate.index, true)
+                    onClicked: {
+                      root.requestTabSelection(tabDelegate.index)
+                      tabDelegate.forceActiveFocus(Qt.MouseFocusReason)
+                    }
                   }
                 }
               }
@@ -1213,8 +1367,9 @@ Item {
                     }
                   }
                   onStatusMessage: function(text) {
-                    root.statusMessage = text
+                    root.statusMessage = root.boundedMessage(text, "")
                   }
+                  onDraftDirtyChanged: root.refreshDirtyDisplays()
                 }
               }
             }
@@ -1233,9 +1388,10 @@ Item {
       padding: Style.space(16)
       modal: true
       focus: true
-      closePolicy: root.savingWallpaperDirs
+      closePolicy: root.savingWallpaperDirs || root.wallpaperDirsDirty
         ? Popup.NoAutoClose
         : Popup.CloseOnEscape | Popup.CloseOnPressOutside
+      Keys.onEscapePressed: root.requestCloseWallpaperFolders()
 
       onOpened: Qt.callLater(function() { folderPathField.forceActiveFocus() })
       onClosed: if (root.opened) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
@@ -1258,7 +1414,7 @@ Item {
 
             Text {
               textFormat: Text.PlainText
-              text: "Wallpaper folders"
+              text: "Wallpaper folders" + (root.wallpaperDirsDirty ? " · Unsaved" : "")
               color: root.fg
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
@@ -1281,8 +1437,11 @@ Item {
             tooltipText: "Close"
             foreground: root.fg
             fontFamily: root.fontFamily
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Close wallpaper folders"
             enabled: !root.savingWallpaperDirs
-            onClicked: wallpaperDirsPopup.close()
+            onClicked: root.requestCloseWallpaperFolders()
           }
         }
 
@@ -1296,6 +1455,18 @@ Item {
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          visible: root.wallpaperDirsDirty && root.wallpaperDirsError.length === 0
+          text: "Unsaved folder changes"
+          color: Color.accent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          Accessible.role: Accessible.StaticText
+          Accessible.name: text
         }
 
         RowLayout {
@@ -1317,6 +1488,9 @@ Item {
             iconText: "󰐕"
             foreground: root.fg
             bordered: true
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Add wallpaper folder"
             enabled: !actionProc.running && folderPathField.text.trim().length > 0
             onClicked: root.addWallpaperFolder()
           }
@@ -1392,6 +1566,9 @@ Item {
                 tooltipText: "Remove folder"
                 foreground: root.fg
                 fontFamily: root.fontFamily
+                focusable: true
+                Accessible.role: Accessible.Button
+                Accessible.name: "Remove wallpaper folder " + modelData
                 enabled: !actionProc.running
                 onClicked: root.removeWallpaperFolder(index)
               }
@@ -1420,8 +1597,11 @@ Item {
             text: "Cancel"
             foreground: root.fg
             bordered: true
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Cancel wallpaper folder changes"
             enabled: !root.savingWallpaperDirs
-            onClicked: wallpaperDirsPopup.close()
+            onClicked: root.requestCloseWallpaperFolders()
           }
 
           Button {
@@ -1432,8 +1612,97 @@ Item {
             accent: Color.accent
             active: true
             bordered: true
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Save wallpaper folders"
             enabled: !actionProc.running && !root.displayBusy && root.wallpaperDirsDirty
             onClicked: root.saveWallpaperFolders()
+          }
+        }
+      }
+    }
+
+    Popup {
+      id: discardChangesPopup
+      parent: window.contentItem
+      x: Math.max(Style.space(8), (window.width - width) / 2)
+      y: Math.max(Style.space(8), (window.height - height) / 2)
+      width: Math.min(Style.space(500), window.width - Style.space(32))
+      padding: Style.space(16)
+      modal: true
+      focus: true
+      closePolicy: Popup.NoAutoClose
+      onOpened: Qt.callLater(function() { keepEditingButton.forceActiveFocus() })
+
+      background: BorderSurface {
+        color: root.bg
+        borderSpec: Border.controlSpec("normal", Color.urgent, Color.urgent)
+        radius: Style.cornerRadius
+      }
+
+      contentItem: ColumnLayout {
+        spacing: Style.space(12)
+
+        Text {
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          text: "Unsaved changes"
+          color: root.fg
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
+          font.bold: true
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          text: {
+            if (root.pendingDiscardAction === "tab")
+              return "Discard unsaved changes for " + root.currentMonitorTitle + " and switch displays?"
+            if (root.pendingDiscardAction === "folders")
+              return "Discard the unsaved wallpaper-folder changes?"
+            var parts = []
+            if (root.dirtyDisplays.length)
+              parts.push("display settings for " + root.dirtyDisplays.join(", "))
+            if (wallpaperDirsPopup.opened && root.wallpaperDirsDirty)
+              parts.push("wallpaper folders")
+            return "Close the panel and discard unsaved " + (parts.length ? parts.join(" and ") : "changes") + "?"
+          }
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        RowLayout {
+          Layout.fillWidth: true
+          spacing: Style.space(8)
+          Item { Layout.fillWidth: true }
+
+          Button {
+            id: keepEditingButton
+            text: "Keep editing"
+            foreground: root.fg
+            bordered: true
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Keep editing without discarding changes"
+            onClicked: {
+              root.pendingDiscardAction = ""
+              root.pendingTabIndex = -1
+              discardChangesPopup.close()
+            }
+          }
+
+          Button {
+            text: "Discard changes"
+            foreground: Color.urgent
+            accent: Color.urgent
+            bordered: true
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Discard unsaved changes"
+            onClicked: root.confirmDiscardChanges()
           }
         }
       }

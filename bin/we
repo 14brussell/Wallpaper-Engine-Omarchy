@@ -54,8 +54,10 @@ Commands:
   uninstall-menu               Remove menu entries
   doctor                       Check dependencies and paths
 
-set-display / set-defaults options:
+set-display-only option:
   --wallpaper <id|path>   Workshop id or wallpaper folder
+
+set-display / set-defaults options:
   --scaling <mode>        stretch | fit | fill | default
   --fps <n>               Frame limit for this display process
   --silent / --audio      Mute or enable wallpaper audio
@@ -100,14 +102,13 @@ EOF
 
 cmd_set_defaults() {
   we_load_config
-  local wallpaper="" scaling="" fps="" silent="" volume="" layer="" clamp=""
+  local scaling="" fps="" silent="" volume="" layer="" clamp=""
   local no_fullscreen_pause="" pause_only_active="" pause_ignore_appids="" pause_ignore_set=0
   local noautomute="" no_audio_processing="" disable_particles=""
   local disable_mouse="" disable_parallax=""
   local -a props=()
   while (( $# > 0 )); do
     case "$1" in
-      --wallpaper) wallpaper=$2; shift 2 ;;
       --scaling) scaling=$2; shift 2 ;;
       --fps) fps=$2; shift 2 ;;
       --silent) silent=true; shift ;;
@@ -166,7 +167,6 @@ cmd_set_defaults() {
   [[ -n $disable_mouse ]] && we_jq_write --argjson v "$disable_mouse" '.defaults.disable_mouse = $v'
   [[ -n $disable_parallax ]] && we_jq_write --argjson v "$disable_parallax" \
     '.defaults.disable_parallax = $v'
-  [[ -n $wallpaper ]] && we_jq_write --arg v "$wallpaper" '.defaults.wallpaper = $v'
   local p k v
   for p in "${props[@]}"; do
     k=${p%%=*}

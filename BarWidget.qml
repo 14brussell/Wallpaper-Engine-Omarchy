@@ -12,6 +12,8 @@ BarWidget {
   moduleName: "io.github.14brussell.wallpaper-engine"
 
   property bool engineActive: false
+  property bool revertBusy: false
+  property string revertError: ""
 
   readonly property string pluginRoot: {
     var url = Qt.resolvedUrl(".")
@@ -31,19 +33,41 @@ BarWidget {
     }
   }
 
-  function openPanel() {
-    // Summon (always show), never toggle — a second left-click must not close.
-    if (root.bar && root.bar.shell && typeof root.bar.shell.summon === "function") {
-      root.bar.shell.summon(root.pluginId)
+  function togglePanel() {
+    if (root.bar && root.bar.shell && typeof root.bar.shell.toggle === "function") {
+      root.bar.shell.toggle(root.pluginId, "{}")
       return
     }
     if (!root.bar) return
-    root.bar.run("omarchy-shell shell summon " + Util.shellQuote(root.pluginId))
+    root.bar.run("omarchy-shell shell toggle " + Util.shellQuote(root.pluginId))
   }
 
   function revertTheme() {
-    if (!root.weBin.length) return
-    Util.execArgv([root.weBin, "revert"])
+    if (!root.weBin.length || revertProc.running) return
+    revertError = ""
+    revertBusy = true
+    revertProc.command = [root.weBin, "revert"]
+    try {
+      revertProc.running = true
+    } catch (e) {
+      revertBusy = false
+      notifyRevertFailure("Could not start the theme restore")
+    }
+  }
+
+  function notifyRevertFailure(detail) {
+    var body = String(detail || "Run we doctor for details").replace(/[\r\n]+/g, " ").trim()
+    if (body.length > 160) body = body.slice(0, 157) + "…"
+    revertError = body
+    Quickshell.execDetached([
+      "omarchy-notification-send",
+      "--app-name", "Wallpaper Engine",
+      "-g", "󰕍",
+      "-u", "critical",
+      "-t", "7000",
+      "Wallpaper theme restore failed",
+      body
+    ])
   }
 
   function openAdvancedTui() {
@@ -61,16 +85,35 @@ BarWidget {
       openAdvancedTui()
       return
     }
-    openPanel()
+    togglePanel()
+  }
+
+  Process {
+    id: revertProc
+    property string lastStderr: ""
+    stdout: StdioCollector { waitForEnd: false }
+    stderr: StdioCollector {
+      waitForEnd: false
+      onStreamFinished: revertProc.lastStderr = String(text || "").trim()
+    }
+    onExited: function(code) {
+      root.revertBusy = false
+      if (code === 0) {
+        root.revertError = ""
+        return
+      }
+      var first = revertProc.lastStderr.length
+        ? revertProc.lastStderr.split("\n")[0]
+        : "Revert exited with status " + code
+      root.notifyRevertFailure(first)
+    }
   }
 
   FileView {
     id: activeFlag
     path: {
-      var state = Quickshell.env("XDG_STATE_HOME")
       var home = Quickshell.env("HOME")
-      var base = (state && state.length) ? state : (home + "/.local/state")
-      return base + "/omarchy/wallpaper-engine/active"
+      return home + "/.local/state/omarchy/wallpaper-engine/active"
     }
     watchChanges: true
     printErrors: false
@@ -87,9 +130,13 @@ BarWidget {
     slotSize: Style.bar.statusSlot
     active: root.engineActive
     activeColor: Color.accent
-    tooltipText: root.engineActive
-      ? "Wallpaper Engine active — left: summon panel, right: revert, middle: advanced TUI"
-      : "Wallpaper Engine — left: summon panel, right: revert"
+    tooltipText: {
+      var state = root.engineActive ? "Wallpaper Engine active" : "Wallpaper Engine stopped"
+      var actions = "left: toggle panel, right: revert theme, middle: advanced TUI"
+      if (root.revertBusy) return state + " — restoring theme…"
+      if (root.revertError.length) return state + " — restore failed: " + root.revertError
+      return state + " — " + actions
+    }
 
     onPressed: function (b) {
       root.triggerPress(b)

@@ -17,7 +17,7 @@ Display names and resolutions are detected from each user’s Hyprland setup.
 ## Highlights
 
 - Quickshell panel with one tab per display, live Running/Stopped badges, and contextual Start/Stop controls for each display
-- Streamlined per-display settings with a fixed **Save & apply** action, in-button progress and errors, plus scaling, FPS, clamp, audio, wallpaper properties, and other engine options
+- Streamlined per-display settings with a stable **Save & apply** action and adjacent severity-aware progress and errors, plus scaling, FPS, clamp, audio, wallpaper properties, and other engine options
 - Workshop browser with thumbnails, wallpaper properties, and a shared catalog and search filter that stay cached while switching display tabs
 - Additional Steam libraries on other disks, managed from the GUI or CLI
 - Seamless per-display replacement that keeps the old wallpaper running until the new one produces a complete rendered frame, rejecting incomplete or blank framebuffer captures
@@ -33,6 +33,17 @@ Display names and resolutions are detected from each user’s Hyprland setup.
 - `jq` and `hyprctl` (included with a normal Omarchy install)
 - `python-pillow` for the wallpaper-to-theme auto-match action
 - `gum` only if you want the advanced TUI
+
+Install the non-Steam dependencies through Omarchy before the first apply:
+
+```bash
+omarchy pkg aur add linux-wallpaperengine-git
+omarchy pkg add python-pillow
+```
+
+Open Wallpaper Engine in Steam at least once and download the Workshop items
+you want to use. The installer finishes with `omarchy-we doctor`; treat any
+reported missing engine or image dependency as an incomplete setup.
 
 ## Install
 
@@ -51,6 +62,25 @@ omarchy plugin enable io.github.14brussell.wallpaper-engine
 ```
 
 The installer copies the plugin into its canonical directory and links `omarchy-we` and `we-omarchy` into `~/.local/bin`. Do not symlink the repository into `~/.config/omarchy/plugins/`; QML may reject the path because of filename case differences. Re-run the installer after changing the source tree.
+
+Omarchy discovers plugins, themes, hooks, and menu extensions from its
+canonical `~/.config/omarchy` tree. This plugin deliberately follows those
+paths even when generic XDG directory variables point elsewhere.
+
+### Update
+
+After an Omarchy-managed plugin update, rerun the plugin installer so the
+updated checkout is validated, integrations are reconciled, and the shell is
+restarted with the verified generation:
+
+```bash
+omarchy plugin update io.github.14brussell.wallpaper-engine
+~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/install.sh
+```
+
+Installed hooks are small wrappers around the current plugin sources, so hook
+fixes take effect with the updated checkout rather than leaving copied older
+logic behind.
 
 If the installer finds the legacy `wallpaper-engine-omarchy` plugin ID, it stops
 before making changes and prints the exact migration commands. Remove the legacy
@@ -96,14 +126,20 @@ other dependency.
 - **Style → Wallpaper Engine:** open the panel
 - **Style → Revert to theme background:** stop Wallpaper Engine and restore the theme
 - **Style → Wallpaper Engine (advanced TUI):** open the gum interface
-- **Bar widget:** left-click opens the panel, middle-click opens the TUI, and right-click restores the theme
+- **Bar widget:** left-click toggles the panel, middle-click opens the TUI, and right-click restores the theme
 
 ### GUI (tab per display)
 
 Open it from the Style menu, bar widget, or `omarchy-we panel`. Each live
 Hyprland display gets its own tab, with **Start** and **Stop** directly below it
 for that display's process. Choose a wallpaper, adjust its settings, and click
-**Save & apply**. **Clear** removes only that display's configuration.
+**Save & apply**. **Clear & stop** removes only that display's saved
+configuration and stops its wallpaper process.
+
+The panel supports keyboard operation: Tab moves through actions and fields,
+arrow keys move across display tabs and wallpaper rows, and Enter or Space
+activates the focused choice. Destructive Clear and unsaved-change discards
+require confirmation.
 
 Use the folder button beside **Workshop Wallpapers** to add libraries from
 other disks. You can paste a Steam library directory, its `steamapps`
@@ -118,7 +154,7 @@ The lifecycle controls below the selected tab are display-specific:
 The theme controls above the tabs remain global:
 
 - **Revert to theme:** stop them and restore the Omarchy theme background
-- **Auto-match theme:** build and apply an accessible Omarchy palette from the most recently successfully applied wallpaper, regardless of which display tab is selected. The control stays disabled until a wallpaper has been successfully applied. The button becomes **Undo theme match** and restores the previously selected theme.
+- **Auto-match theme:** build and apply an accessible Omarchy palette from the most recently successfully applied wallpaper, regardless of which display tab is selected. Starting a new match requires both a successfully applied source frame and a currently running plugin-owned wallpaper process. The button becomes **Undo theme match** and restores the previously selected theme.
 
 Auto-match writes only to the plugin-owned custom theme at
 `~/.config/omarchy/themes/wallpaper-engine-auto-match`. It refuses to overwrite

@@ -57,6 +57,9 @@ Item {
   onBusyChanged: root.actionBusyChanged(busy, actionKind)
   property string localStatus: ""
   property string saveApplyStatus: ""
+  // Typed feedback is rendered beside the action. Keep the button label stable
+  // so assistive technology and muscle memory always find the same control.
+  property string saveApplyState: "idle" // idle | busy | success | error
   property bool configured: false
   property bool hasWallpaper: false
   property string actionKind: ""
@@ -66,6 +69,8 @@ Item {
   property int draftRevision: 0
   /** True while the controls contain changes not yet saved by Save & apply/Clear. */
   property bool draftDirty: false
+  property bool clearConfirmationVisible: false
+  property bool reloadConfirmationVisible: false
   /** Draft revision captured by the current Save & apply/Clear transaction. */
   property int actionDraftRevision: 0
   /** Preserve a Save & apply click made while capabilities are loading. */
@@ -207,15 +212,34 @@ Item {
   }
 
   function setError(msg) {
-    setStatus(msg)
-    if (msg && msg.length)
-      root.errorOccurred(msg)
+    var safe = boundedMessage(msg, "Action failed")
+    setStatus(safe)
+    if (safe.length)
+      root.errorOccurred(safe)
+  }
+
+  function boundedMessage(msg, fallback) {
+    var value = String(msg || fallback || "").replace(/[\r\n]+/g, " ").trim()
+    if (value.length > 180)
+      value = value.slice(0, 177) + "…"
+    return value
+  }
+
+  function setSaveApplyFeedback(state, msg) {
+    saveApplyState = state || "idle"
+    saveApplyStatus = boundedMessage(msg, "")
   }
 
   function markDraftEdited() {
     draftRevision += 1
     draftDirty = true
-    saveApplyStatus = ""
+    setSaveApplyFeedback("idle", "")
+  }
+
+  function discardDraftAndReload() {
+    draftDirty = false
+    reloadConfirmationVisible = false
+    reload()
   }
 
   function continueQueuedApply() {
@@ -237,7 +261,7 @@ Item {
 
   function reload() {
     if (!displayName || !displayName.length) return
-    saveApplyStatus = ""
+    setSaveApplyFeedback("idle", "")
     setStatus("")
     loadDisplayConfig()
   }
@@ -414,7 +438,7 @@ Item {
     if (wasRunning)
       actionProc.running = false
     if (failedKind === "apply")
-      saveApplyStatus = failure
+      setSaveApplyFeedback("error", failure)
     setError(failure)
   }
 
@@ -466,12 +490,12 @@ Item {
     // focus so editable SpinBoxes commit their current text before argv is read.
     root.forceActiveFocus(Qt.MouseFocusReason)
     if (!displayName || !displayName.length) {
-      saveApplyStatus = "No display selected"
+      setSaveApplyFeedback("error", "No display selected")
       setError("No display selected")
       return
     }
     if (!selectedWallpaperId || !String(selectedWallpaperId).length) {
-      saveApplyStatus = "Select a wallpaper first"
+      setSaveApplyFeedback("error", "Select a wallpaper first")
       setError("Select a wallpaper first")
       return
     }
@@ -480,14 +504,14 @@ Item {
     if (capsLoading || configReadCurrent) {
       applyQueued = true
       queuedApplyWallpaperId = String(selectedWallpaperId)
-      saveApplyStatus = "Save & apply queued…"
+      setSaveApplyFeedback("busy", "Queued while settings finish loading…")
       setStatus(capsLoading
         ? "Loading wallpaper properties — Save & apply queued"
         : "Loading display settings — Save & apply queued")
       return
     }
     actionDraftRevision = draftRevision
-    saveApplyStatus = "Applying…"
+    setSaveApplyFeedback("busy", "Applying to " + displayName + "…")
     startWeChain(
       [buildSetDisplayArgv(), [resolvedWeBin, "apply", displayName]],
       "apply",
@@ -522,6 +546,7 @@ Item {
   function clearDisplay() {
     if (actionsBlocked || actionProc.running) return
     if (!displayName || !displayName.length) return
+    setSaveApplyFeedback("idle", "")
     actionDraftRevision = draftRevision
     startWeChain(
       [
@@ -800,7 +825,7 @@ Item {
               var appliedMessage = root.engineRunning
                 ? ("Applied to " + root.displayName)
                 : ("Applied & started on " + root.displayName)
-              root.saveApplyStatus = appliedMessage
+              root.setSaveApplyFeedback("success", appliedMessage)
               root.setStatus(appliedMessage)
             }
             else if (kind === "clear")
@@ -835,8 +860,9 @@ Item {
               failureMessage = kind === "clear" ? "Clear failed"
                 : (kind === "stop" ? "Stop failed" : "we failed")
             }
+            failureMessage = root.boundedMessage(failureMessage, "Action failed")
             if (kind === "apply")
-              root.saveApplyStatus = failureMessage
+              root.setSaveApplyFeedback("error", failureMessage)
             root.setError(failureMessage)
           }
         })
@@ -958,6 +984,9 @@ Item {
           accent: Color.accent
           active: !root.engineRunning && root.configured
           bordered: true
+          focusable: true
+          Accessible.role: Accessible.Button
+          Accessible.name: "Start saved wallpaper on " + root.displayName
           visible: !root.engineRunning
           enabled: !root.actionsBlocked && root.displayName.length > 0
             && root.configured && root.hasWallpaper && !root.engineRunning
@@ -971,6 +1000,9 @@ Item {
           tooltipText: "Stop Wallpaper Engine on " + root.displayName
           foreground: root.fg
           bordered: true
+          focusable: true
+          Accessible.role: Accessible.Button
+          Accessible.name: "Stop wallpaper on " + root.displayName
           visible: root.engineRunning
           enabled: !root.actionsBlocked && root.displayName.length > 0
             && root.engineRunning
@@ -1020,18 +1052,23 @@ Item {
             foreground: root.fg
             fontFamily: root.fontFamily
             bordered: true
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Manage wallpaper folders"
             enabled: !root.actionsBlocked && !root.loading
             onClicked: root.editWallpaperFoldersRequested()
           }
         }
 
         TextField {
+          id: wallpaperFilterField
           Layout.fillWidth: true
           placeholderText: "Filter by title or id"
           text: root.filterText
           foreground: root.fg
           font.family: root.fontFamily
           onTextEdited: root.filterTextEdited(text)
+          Accessible.name: "Filter Workshop wallpapers"
         }
 
         Text {
@@ -1046,7 +1083,12 @@ Item {
         Text {
           textFormat: Text.PlainText
           visible: !root.loading && root.filteredWallpapers.length === 0
-          text: "No wallpapers found. Subscribe in Steam Wallpaper Engine."
+          text: {
+            var query = String(root.filterText || "").trim()
+            if (query.length && (root.wallpapers || []).length > 0)
+              return "No wallpapers match ‘" + query + "’. Clear the filter to see the catalog."
+            return "No Workshop wallpapers found. Subscribe in Steam Wallpaper Engine or add a wallpaper folder."
+          }
           color: root.dim
           wrapMode: Text.WordWrap
           Layout.fillWidth: true
@@ -1063,6 +1105,20 @@ Item {
           spacing: Style.space(4)
           model: root.filteredWallpapers
           boundsBehavior: Flickable.StopAtBounds
+          activeFocusOnTab: count > 0
+          Accessible.role: Accessible.List
+          Accessible.name: "Workshop wallpapers"
+
+          function focusRow(index) {
+            if (count <= 0) return
+            var next = Math.max(0, Math.min(index, count - 1))
+            currentIndex = next
+            positionViewAtIndex(next, ListView.Contain)
+            Qt.callLater(function() {
+              var row = wallpaperList.itemAtIndex(next)
+              if (row) row.forceActiveFocus(Qt.TabFocusReason)
+            })
+          }
           QQC.ScrollBar.vertical: QQC.ScrollBar {
             id: wallpaperScrollBar
             policy: wallpaperList.hasVerticalOverflow
@@ -1085,21 +1141,60 @@ Item {
           }
 
           delegate: BorderSurface {
+            id: wallpaperRow
             required property var modelData
             required property int index
 
+            readonly property bool selected: String(root.selectedWallpaperId)
+              === String(modelData.id)
+
+            function chooseWallpaper() {
+              if (!wallpaperRow.enabled) return
+              var nextId = String(modelData.id)
+              if (nextId !== String(root.selectedWallpaperId || "")) {
+                root.markDraftEdited()
+                root.selectedWallpaperId = nextId
+                root.wallpaperTitleBound = String(modelData.title || "")
+              }
+              wallpaperList.currentIndex = index
+            }
+
             width: wallpaperList.width
             implicitHeight: Style.space(64)
+            activeFocusOnTab: true
+            enabled: !root.actionsBlocked
+            Accessible.role: Accessible.ListItem
+            Accessible.name: String(modelData.title || modelData.id)
+              + ", wallpaper " + String(modelData.id)
+            Accessible.selected: wallpaperRow.selected
+            Accessible.focusable: true
+            Keys.onReturnPressed: wallpaperRow.chooseWallpaper()
+            Keys.onEnterPressed: wallpaperRow.chooseWallpaper()
+            Keys.onSpacePressed: wallpaperRow.chooseWallpaper()
+            Keys.onUpPressed: wallpaperList.focusRow(index - 1)
+            Keys.onDownPressed: wallpaperList.focusRow(index + 1)
+            Keys.onPressed: function(event) {
+              if (event.key === Qt.Key_Home) {
+                wallpaperList.focusRow(0)
+                event.accepted = true
+              } else if (event.key === Qt.Key_End) {
+                wallpaperList.focusRow(wallpaperList.count - 1)
+                event.accepted = true
+              }
+            }
             radius: Style.cornerRadius
             color: {
-              var selected = String(root.selectedWallpaperId) === String(modelData.id)
-              if (selected) return Style.selectedFillFor(root.fg, Color.accent)
+              if (wallpaperRow.activeFocus)
+                return Style.focusFillFor(root.fg, Color.accent)
+              if (wallpaperRow.selected) return Style.selectedFillFor(root.fg, Color.accent)
               if (rowMouse.containsMouse) return Style.hoverFillFor(root.fg, Color.accent)
               return "transparent"
             }
-            borderSpec: String(root.selectedWallpaperId) === String(modelData.id)
-              ? Border.controlSpec("selected", root.fg, Color.accent)
-              : Border.none()
+            borderSpec: wallpaperRow.activeFocus
+              ? Border.controlSpec("focus", root.fg, Color.accent)
+              : (wallpaperRow.selected
+                ? Border.controlSpec("selected", root.fg, Color.accent)
+                : Border.none())
 
             RowLayout {
               anchors.fill: parent
@@ -1163,9 +1258,8 @@ Item {
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onClicked: {
-                root.markDraftEdited()
-                root.selectedWallpaperId = String(modelData.id)
-                root.wallpaperTitleBound = String(modelData.title || "")
+                wallpaperRow.chooseWallpaper()
+                wallpaperRow.forceActiveFocus(Qt.MouseFocusReason)
               }
             }
           }
@@ -1188,7 +1282,7 @@ Item {
         PanelSectionHeader {
           Layout.fillWidth: true
           text: root.displayName.length
-            ? ("SETTINGS · " + root.displayName)
+            ? ("SETTINGS · " + root.displayName + (root.draftDirty ? " · UNSAVED" : ""))
             : "SETTINGS"
           foreground: root.fg
           fontFamily: root.fontFamily
@@ -1196,14 +1290,70 @@ Item {
 
         PanelActionButton {
           iconText: "󰑐"
-          tooltipText: "Reload this display"
+          tooltipText: root.draftDirty
+            ? "Discard unsaved changes and reload this display"
+            : "Reload this display"
           foreground: root.fg
           fontFamily: root.fontFamily
+          focusable: true
+          Accessible.role: Accessible.Button
+          Accessible.name: tooltipText
           enabled: !root.actionsBlocked && !configProc.running
           onClicked: {
-            // An explicit reload intentionally discards the current draft.
-            root.draftDirty = false
-            root.reload()
+            if (root.draftDirty)
+              root.reloadConfirmationVisible = true
+            else
+              root.reload()
+          }
+        }
+      }
+
+      BorderSurface {
+        visible: root.reloadConfirmationVisible
+        Layout.fillWidth: true
+        color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.09)
+        borderSpec: Border.controlSpec("normal", Color.urgent, Color.urgent)
+        radius: Style.cornerRadius
+        implicitHeight: reloadConfirmCol.implicitHeight + Style.space(20)
+
+        ColumnLayout {
+          id: reloadConfirmCol
+          anchors.fill: parent
+          anchors.margins: Style.space(10)
+          spacing: Style.space(8)
+
+          Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            text: "Discard unsaved changes for " + root.displayName + " and reload its saved settings?"
+            color: Color.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          RowLayout {
+            Layout.fillWidth: true
+            Item { Layout.fillWidth: true }
+            Button {
+              text: "Keep editing"
+              foreground: root.fg
+              bordered: true
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Keep editing unsaved display settings"
+              onClicked: root.reloadConfirmationVisible = false
+            }
+            Button {
+              text: "Discard & reload"
+              foreground: Color.urgent
+              accent: Color.urgent
+              bordered: true
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Discard unsaved display settings and reload"
+              onClicked: root.discardDraftAndReload()
+            }
           }
         }
       }
@@ -1477,6 +1627,9 @@ Item {
                 description: "Uses --silent. Unmute to set --volume."
                 checked: root.silent
                 foreground: root.fg
+                Accessible.role: Accessible.CheckBox
+                Accessible.name: label
+                Accessible.checked: checked
                 onClicked: {
                   root.markDraftEdited()
                   root.silent = !root.silent
@@ -1502,6 +1655,9 @@ Item {
                 description: "Keep wallpaper audio when other apps play sound (--noautomute)."
                 checked: root.noautomute
                 foreground: root.fg
+                Accessible.role: Accessible.CheckBox
+                Accessible.name: label
+                Accessible.checked: checked
                 onClicked: {
                   root.markDraftEdited()
                   root.noautomute = !root.noautomute
@@ -1514,6 +1670,9 @@ Item {
                 description: "Turns off audio-reactive wallpaper features (--no-audio-processing)."
                 checked: root.noAudioProcessing
                 foreground: root.fg
+                Accessible.role: Accessible.CheckBox
+                Accessible.name: label
+                Accessible.checked: checked
                 onClicked: {
                   root.markDraftEdited()
                   root.noAudioProcessing = !root.noAudioProcessing
@@ -1573,6 +1732,9 @@ Item {
                       return v === "true" || v === "1" || v === "True"
                     }
                     foreground: root.fg
+                    Accessible.role: Accessible.CheckBox
+                    Accessible.name: label
+                    Accessible.checked: checked
                     onClicked: {
                       var cur = root.propValueFor(modelData.key, modelData.value)
                       var on = cur === "true" || cur === "1" || cur === "True"
@@ -1700,6 +1862,9 @@ Item {
                 description: "Do not pause this display's wallpaper for fullscreen apps."
                 checked: root.noFullscreenPause
                 foreground: root.fg
+                Accessible.role: Accessible.CheckBox
+                Accessible.name: label
+                Accessible.checked: checked
                 onClicked: {
                   root.markDraftEdited()
                   root.noFullscreenPause = !root.noFullscreenPause
@@ -1713,6 +1878,9 @@ Item {
                 description: "Wayland-only. Ignores fullscreen windows that are not active."
                 checked: root.fullscreenPauseOnlyActive
                 foreground: root.fg
+                Accessible.role: Accessible.CheckBox
+                Accessible.name: label
+                Accessible.checked: checked
                 onClicked: {
                   root.markDraftEdited()
                   root.fullscreenPauseOnlyActive = !root.fullscreenPauseOnlyActive
@@ -1751,6 +1919,9 @@ Item {
                 description: "Skips scene particle systems (--disable-particles)."
                 checked: root.disableParticles
                 foreground: root.fg
+                Accessible.role: Accessible.CheckBox
+                Accessible.name: label
+                Accessible.checked: checked
                 onClicked: {
                   root.markDraftEdited()
                   root.disableParticles = !root.disableParticles
@@ -1765,6 +1936,9 @@ Item {
                   : "Available even though this wallpaper does not advertise mouse support."
                 checked: root.disableMouse
                 foreground: root.fg
+                Accessible.role: Accessible.CheckBox
+                Accessible.name: label
+                Accessible.checked: checked
                 onClicked: {
                   root.markDraftEdited()
                   root.disableMouse = !root.disableMouse
@@ -1779,6 +1953,9 @@ Item {
                   : "Available even though this wallpaper does not advertise parallax support."
                 checked: root.disableParallax
                 foreground: root.fg
+                Accessible.role: Accessible.CheckBox
+                Accessible.name: label
+                Accessible.checked: checked
                 onClicked: {
                   root.markDraftEdited()
                   root.disableParallax = !root.disableParallax
@@ -1820,6 +1997,9 @@ Item {
                   text: "Set"
                   foreground: root.fg
                   bordered: true
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: "Save custom wallpaper property"
                   enabled: !root.actionsBlocked && root.displayName.length > 0
                   onClicked: root.setCustomProperty()
                 }
@@ -1861,19 +2041,112 @@ Item {
 
             Button {
               id: saveApplyButton
-              text: root.saveApplyStatus.length
-                ? root.saveApplyStatus
-                : "Save & apply"
+              text: "Save & apply"
               iconText: "󰐊"
               foreground: root.fg
               accent: Color.accent
               bordered: true
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Save settings and apply wallpaper to " + root.displayName
               enabled: !root.actionsBlocked && root.displayName.length > 0
                 && root.wallpaperSelected
               Layout.fillWidth: true
               onClicked: root.applySettings()
             }
 
+            Button {
+              id: clearButton
+              text: "Clear & stop"
+              iconText: "󰆴"
+              tooltipText: "Clear saved wallpaper settings and stop " + root.displayName
+              foreground: Color.urgent
+              accent: Color.urgent
+              bordered: true
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Clear saved wallpaper settings and stop " + root.displayName
+              enabled: !root.actionsBlocked && root.displayName.length > 0
+                && (root.configured || root.hasWallpaper)
+              onClicked: root.clearConfirmationVisible = true
+            }
+          }
+
+          BorderSurface {
+            visible: root.clearConfirmationVisible
+            Layout.fillWidth: true
+            color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.09)
+            borderSpec: Border.controlSpec("normal", Color.urgent, Color.urgent)
+            radius: Style.cornerRadius
+            implicitHeight: clearConfirmCol.implicitHeight + Style.space(18)
+
+            ColumnLayout {
+              id: clearConfirmCol
+              anchors.fill: parent
+              anchors.margins: Style.space(9)
+              spacing: Style.space(7)
+
+              Text {
+                textFormat: Text.PlainText
+                Layout.fillWidth: true
+                text: "Clear saved settings and stop Wallpaper Engine on "
+                  + root.displayName + "?"
+                  + (root.draftDirty ? " Unsaved edits will also be discarded." : "")
+                color: Color.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+
+              RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Button {
+                  text: "Cancel"
+                  foreground: root.fg
+                  bordered: true
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: "Keep saved wallpaper settings"
+                  onClicked: root.clearConfirmationVisible = false
+                }
+                Button {
+                  text: "Clear settings & stop"
+                  foreground: Color.urgent
+                  accent: Color.urgent
+                  bordered: true
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: "Confirm clear saved settings and stop " + root.displayName
+                  onClicked: {
+                    root.clearConfirmationVisible = false
+                    root.clearDisplay()
+                  }
+                }
+              }
+            }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            visible: root.saveApplyStatus.length > 0
+            text: {
+              if (root.saveApplyState === "busy") return "Working: " + root.saveApplyStatus
+              if (root.saveApplyState === "success") return "Success: " + root.saveApplyStatus
+              if (root.saveApplyState === "error") return "Error: " + root.saveApplyStatus
+              return root.saveApplyStatus
+            }
+            color: root.saveApplyState === "error"
+              ? Color.urgent
+              : (root.saveApplyState === "busy" ? Color.accent : root.fg)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: root.saveApplyState === "error"
+            wrapMode: Text.WordWrap
+            Accessible.role: Accessible.StaticText
+            Accessible.name: text
+            Accessible.description: "Save and apply status"
           }
 
           Text {

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Install Omarchy hooks so Wallpaper Engine restores on boot and tracks theme bgs.
-# Hook bodies live in hooks/*.sh; this script copies them into ~/.config/omarchy/hooks
-# with ROOT baked to the plugin tree (live hooks cannot locate the plugin via $0).
+# Hook bodies live in hooks/*.sh. Installed hooks are tiny wrapper shims that
+# resolve the current canonical source at execution time, so a normal Omarchy
+# plugin update cannot leave stale copied hook logic behind.
 
 set -euo pipefail
 
@@ -18,7 +19,9 @@ usage() {
   exit 1
 }
 
-# Copy a reference hook, inject the marker, and pin ROOT to this plugin tree.
+# Install a marker-bearing wrapper that forwards every argument to the current
+# canonical hook source. printf %q makes paths containing shell metacharacters
+# safe to embed in the wrapper.
 write_hook() {
   local src=$1 dest=$2
   [[ -f $src ]] || {
@@ -26,24 +29,19 @@ write_hook() {
     exit 1
   }
   mkdir -p "$(dirname -- "$dest")"
-  local tmp line first=1
+  local tmp quoted_src
   tmp=$(mktemp "${dest}.tmp.XXXXXX")
+  printf -v quoted_src '%q' "$src"
   {
     echo "#!/usr/bin/env bash"
     echo "$MARKER"
-    while IFS= read -r line || [[ -n $line ]]; do
-      if (( first )) && [[ $line == "#!"* ]]; then
-        first=0
-        continue
-      fi
-      first=0
-      [[ $line == "$MARKER" ]] && continue
-      if [[ $line == ROOT=* ]]; then
-        printf 'ROOT="%s"\n' "$ROOT"
-      else
-        printf '%s\n' "$line"
-      fi
-    done <"$src"
+    echo "set -euo pipefail"
+    printf 'HOOK_SOURCE=%s\n' "$quoted_src"
+    echo 'if [[ ! -f $HOOK_SOURCE ]]; then'
+    echo '  printf '\''Wallpaper Engine hook source is missing: %s\n'\'' "$HOOK_SOURCE" >&2'
+    echo '  exit 1'
+    echo 'fi'
+    echo 'exec "$HOOK_SOURCE" "$@"'
   } >"$tmp"
   chmod +x "$tmp"
   mv "$tmp" "$dest"
@@ -59,7 +57,17 @@ install_hooks() {
 }
 
 remove_hooks() {
-  rm -f "$POST_BOOT" "$THEME_SET"
+  local hook
+  for hook in "$POST_BOOT" "$THEME_SET"; do
+    if [[ ! -e $hook && ! -L $hook ]]; then
+      continue
+    fi
+    if [[ -f $hook ]] && grep -Fqx "$MARKER" "$hook"; then
+      rm -f -- "$hook"
+    else
+      printf 'Preserved (not recognized as plugin-owned): %s\n' "$hook" >&2
+    fi
+  done
   echo "Removed wallpaper-engine hooks."
 }
 

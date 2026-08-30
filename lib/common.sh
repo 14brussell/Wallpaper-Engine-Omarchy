@@ -20,7 +20,7 @@ WE_PLACEHOLDER="$WE_PLUGIN_ROOT/assets/we-placeholder.png"
 WE_COMPOSE_PY="${WE_COMPOSE_PY:-$WE_PLUGIN_ROOT/lib/compose_desktop.py}"
 WE_THEME_GENERATOR="${WE_THEME_GENERATOR:-$WE_PLUGIN_ROOT/lib/generate_theme.py}"
 WE_AUTO_THEME_SLUG="${WE_AUTO_THEME_SLUG:-wallpaper-engine-auto-match}"
-WE_USER_THEMES_DIR="${WE_USER_THEMES_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/themes}"
+WE_USER_THEMES_DIR="${WE_USER_THEMES_DIR:-$HOME/.config/omarchy/themes}"
 WE_AUTO_THEME_DIR="${WE_AUTO_THEME_DIR:-$WE_USER_THEMES_DIR/$WE_AUTO_THEME_SLUG}"
 WE_BG_WAS_DISABLED_FLAG="$WE_STATE_DIR/disabled-omarchy-background"
 WE_TRANSITION_DIR="${WE_TRANSITION_DIR:-$WE_STATE_DIR/transitions}"
@@ -96,26 +96,141 @@ we_default_config_json() {
 EOF
 }
 
+# Validate every value that is consumed as a typed runtime setting. Missing
+# keys are accepted here because we_normalize_config_file fills them from the
+# current defaults as an in-lock migration.
+we_config_types_valid() {
+  jq -e '
+    def optional($key; predicate): (has($key) | not) or (.[$key] | predicate);
+    def null_or_string: . == null or type == "string";
+    def string_array: type == "array" and all(.[]; type == "string");
+    def properties: type == "object" and all(.[]; type | IN("string", "number", "boolean"));
+    def settings:
+      type == "object"
+      and optional("wallpaper"; type == "string")
+      and optional("scaling"; IN("stretch", "fit", "fill", "default"))
+      and optional("fps"; type == "number" and floor == . and . >= 1 and . <= 240)
+      and optional("silent"; type == "boolean")
+      and optional("volume"; type == "number" and floor == . and . >= 0 and . <= 100)
+      and optional("layer"; type == "string" and length > 0)
+      and optional("clamp"; IN("clamp", "border", "repeat"))
+      and optional("no_fullscreen_pause"; type == "boolean")
+      and optional("fullscreen_pause_only_active"; type == "boolean")
+      and optional("fullscreen_pause_ignore_appids"; string_array)
+      and optional("noautomute"; type == "boolean")
+      and optional("no_audio_processing"; type == "boolean")
+      and optional("disable_particles"; type == "boolean")
+      and optional("disable_mouse"; type == "boolean")
+      and optional("disable_parallax"; type == "boolean")
+      and optional("properties"; properties);
+    type == "object"
+    and optional("version"; type == "number" and floor == . and . >= 1)
+    and optional("engine"; type == "string" and length > 0)
+    and optional("assets_dir"; type == "string")
+    and optional("workshop_dirs"; string_array)
+    and optional("extra_wallpaper_dirs"; string_array)
+    and optional("nvidia_workaround"; type == "boolean")
+    and optional("defaults"; settings)
+    and optional("displays"; type == "object" and all(to_entries[]; .value | settings))
+    and optional("active"; type == "boolean")
+    and optional("saved_theme_background"; null_or_string)
+    and optional("last_applied";
+      type == "object"
+      and optional("monitor"; null_or_string)
+      and optional("wallpaper"; null_or_string)
+      and optional("source_image"; null_or_string)
+    )
+    and optional("auto_theme";
+      type == "object"
+      and optional("active"; type == "boolean")
+      and optional("previous_theme"; null_or_string)
+      and optional("source_monitor"; null_or_string)
+      and optional("source_image"; null_or_string)
+      and optional("previous_colors_sha256"; null_or_string)
+      and optional("previous_shell_sha256"; null_or_string)
+      and optional("previous_background_sha256"; null_or_string)
+    )
+  ' "$1" >/dev/null 2>&1
+}
+
+we_normalize_config_file() {
+  local input=$1 defaults=$2 output=$3
+  jq -s '
+    .[0] as $d | .[1] as $c |
+    ($d * $c)
+    | .version = 1
+    | .defaults = ($d.defaults * ($c.defaults // {}))
+    | .displays = ($c.displays // {})
+    | .last_applied = ($d.last_applied * ($c.last_applied // {}))
+    | .auto_theme = ($d.auto_theme * ($c.auto_theme // {}))
+    | if .defaults.layer == "background" then .defaults.layer = "bottom" else . end
+    | .displays |= with_entries(
+        if .value.layer == "background" then .value.layer = "bottom" else . end
+      )
+  ' "$defaults" "$input" >"$output"
+}
+
+we_backup_invalid_config() {
+  local backup="$WE_CONFIG_FILE.invalid.$(date +%s%N)"
+  cp -a -- "$WE_CONFIG_FILE" "$backup"
+  printf '%s\n' "$backup"
+}
+
 we_load_config() {
   we_ensure_dirs
-  local lock_fd tmp
+  local lock_fd tmp defaults backup="" invalid_reason=""
   exec {lock_fd}>"$WE_CONFIG_LOCK"
   flock -w 2 "$lock_fd" || { echo "Wallpaper Engine config is busy." >&2; return 1; }
-  if [[ ! -s $WE_CONFIG_FILE ]] || ! jq -e 'type == "object"' "$WE_CONFIG_FILE" >/dev/null 2>&1; then
-    if [[ -e $WE_CONFIG_FILE ]]; then
-      cp -a "$WE_CONFIG_FILE" "$WE_CONFIG_FILE.invalid.$(date +%s)" 2>/dev/null || true
+  defaults=$(mktemp "$WE_CONFIG_DIR/config.defaults.tmp.XXXXXX")
+  we_default_config_json >"$defaults"
+  if [[ ! -e $WE_CONFIG_FILE ]]; then
+    mv -f "$defaults" "$WE_CONFIG_FILE"
+    defaults=""
+  elif [[ ! -s $WE_CONFIG_FILE ]] || ! jq -e 'type == "object"' "$WE_CONFIG_FILE" >/dev/null 2>&1; then
+    if ! backup=$(we_backup_invalid_config); then
+      rm -f "$defaults"
+      flock -u "$lock_fd"
+      exec {lock_fd}>&-
+      echo "Wallpaper Engine config is invalid and could not be backed up; it was left unchanged." >&2
+      return 1
     fi
+    invalid_reason="malformed JSON or non-object root"
+    mv -f "$defaults" "$WE_CONFIG_FILE"
+    defaults=""
+  elif ! we_config_types_valid "$WE_CONFIG_FILE"; then
+    if ! backup=$(we_backup_invalid_config); then
+      rm -f "$defaults"
+      flock -u "$lock_fd"
+      exec {lock_fd}>&-
+      echo "Wallpaper Engine config is invalid and could not be backed up; it was left unchanged." >&2
+      return 1
+    fi
+    invalid_reason="invalid configuration value types or ranges"
+    mv -f "$defaults" "$WE_CONFIG_FILE"
+    defaults=""
+  else
     tmp=$(mktemp "$WE_CONFIG_DIR/config.json.tmp.XXXXXX")
-    we_default_config_json >"$tmp"
-    mv -f "$tmp" "$WE_CONFIG_FILE"
+    if ! we_normalize_config_file "$WE_CONFIG_FILE" "$defaults" "$tmp"; then
+      rm -f "$tmp" "$defaults"
+      flock -u "$lock_fd"
+      exec {lock_fd}>&-
+      echo "Wallpaper Engine config could not be normalized." >&2
+      return 1
+    fi
+    if ! cmp -s "$tmp" "$WE_CONFIG_FILE"; then
+      mv -f "$tmp" "$WE_CONFIG_FILE"
+    else
+      rm -f "$tmp"
+    fi
   fi
+  [[ -z $defaults ]] || rm -f "$defaults"
   flock -u "$lock_fd"
   exec {lock_fd}>&-
-  # Migrate older configs that defaulted layer to background (fights Omarchy).
-  local layer
-  layer=$(jq -r '.defaults.layer // empty' "$WE_CONFIG_FILE" 2>/dev/null || true)
-  if [[ $layer == background ]]; then
-    we_jq_write '.defaults.layer = "bottom"'
+  if [[ -n $invalid_reason ]]; then
+    echo "Wallpaper Engine config was invalid ($invalid_reason)." >&2
+    [[ -z $backup ]] || echo "Backup: $backup" >&2
+    echo "A safe default config was written; review the backup, then run the command again." >&2
+    return 1
   fi
   # Older configs predate explicit apply recency. Recover it once from the
   # newest confirmed framebuffer whose monitor + wallpaper still match config.
@@ -134,12 +249,14 @@ we_jq_write() {
   exec {lock_fd}>"$WE_CONFIG_LOCK"
   flock -w 2 "$lock_fd" || { echo "Wallpaper Engine config is busy." >&2; return 1; }
   tmp=$(mktemp "$WE_CONFIG_DIR/config.json.tmp.XXXXXX")
-  if jq "$@" "$WE_CONFIG_FILE" >"$tmp"; then
+  if jq "$@" "$WE_CONFIG_FILE" >"$tmp" \
+      && we_config_types_valid "$tmp"; then
     mv -f "$tmp" "$WE_CONFIG_FILE"
   else
     rm -f "$tmp"
     flock -u "$lock_fd"
     exec {lock_fd}>&-
+    echo "Refusing to write an invalid Wallpaper Engine config." >&2
     return 1
   fi
   flock -u "$lock_fd"
@@ -2475,198 +2592,6 @@ we_build_engine_argv() {
 # other monitors' wallpapers from the single linux-wallpaperengine process.
 # They only mark which TO regions are re-rendered (apply-tab); siblings keep
 # live grim / current wallpaper stills in the same canvas.
-we_start_engine() {
-  we_bg_queue_enter
-  we_load_config
-  command -v "$WE_ENGINE_BIN" >/dev/null 2>&1 || {
-    echo "Missing dependency: $WE_ENGINE_BIN (install linux-wallpaperengine-git from AUR)" >&2
-    return 1
-  }
-
-  we_ensure_omarchy_background_enabled
-
-  local monitors=()
-  local m wallpaper
-  mapfile -t monitors < <(we_configured_monitors)
-
-  # Optional args: ensure named monitors are configured with a wallpaper.
-  # Still rebuild argv from the full configured set so sibling displays stay live.
-  if [[ $# -gt 0 ]]; then
-    for m in "$@"; do
-      [[ -n $m ]] || continue
-      wallpaper=$(we_display_wallpaper "$m")
-      if [[ -z $wallpaper ]]; then
-        echo "Display $m has no wallpaper in config. Use: we set-display $m --wallpaper <id>" >&2
-        return 1
-      fi
-    done
-  fi
-
-  if ((${#monitors[@]} == 0)); then
-    echo "No displays configured. Use the menu or: we set-display <monitor> --wallpaper <id>" >&2
-    return 1
-  fi
-
-  we_save_theme_background_if_needed
-
-  we_ensure_dirs
-
-  local -a args=()
-  we_build_engine_argv args "${monitors[@]}"
-  if ((${#args[@]} == 0)); then
-    echo "Failed to build engine arguments." >&2
-    return 1
-  fi
-
-  local wipe_outputs="" running=false overlay_ok=false overlay_done=false
-  local -a changed=()
-  if [[ $# -gt 0 ]]; then
-    for m in "$@"; do
-      [[ -n $m ]] && changed+=("$m")
-    done
-  fi
-
-  we_transition_log "apply start plugin=$WE_PLUGIN_ROOT changed=${changed[*]:-all-configured} engine=$(we_engine_running && echo running || echo stopped)"
-
-  # Overlay is cosmetic. set-display already wrote config; apply MUST stop+start
-  # LWE with those ids. A missing we-wipe IPC or cover timeout is a hard cut,
-  # never a silent no-op that leaves the old engine running.
-  if we_engine_running; then
-    running=true
-  fi
-
-  if we_wipe_available; then
-    if we_overlay_cover_then_to "${changed[@]}"; then
-      overlay_ok=true
-    else
-      we_transition_log "overlay not ready; hard-cut stop+start with current config"
-      echo "Wipe overlay did not cover; applying with a hard cut." >&2
-    fi
-  else
-    we_transition_log "we-wipe IPC missing; hard-cut stop+start with current config"
-    echo "Wipe overlay unavailable; applying with a hard cut." >&2
-  fi
-
-  if $running && we_engine_running; then
-    we_uncover_omarchy_from
-  fi
-
-  if $overlay_ok; then
-    if we_overlay_wait_done; then
-      overlay_done=true
-    else
-      we_transition_log "overlay wipe done wait failed"
-    fi
-  fi
-
-  rm -f "$WE_LWE_SCREENSHOT"
-  : >"$WE_LOG_FILE"
-  echo "+ $WE_ENGINE_BIN ${args[*]}" >>"$WE_LOG_FILE"
-
-  local -a env_prefix=()
-  if [[ $(we_jq -r '.nvidia_workaround // false') == true ]]; then
-    env_prefix=(env __GL_THREADED_OPTIMIZATIONS=0)
-  fi
-
-  # Start LWE under the overlay (holding TO). Drop flock fd 9 so LWE cannot
-  # hold it for its whole lifetime.
-  nohup "${env_prefix[@]}" "$WE_ENGINE_BIN" "${args[@]}" \
-    </dev/null >>"$WE_LOG_FILE" 2>&1 9>&- &
-  local engine_pid=$! pid_ready=false pid_tmp engine_start
-  engine_start=$(we_proc_starttime "$engine_pid" 2>/dev/null || true)
-  local pid_try
-  for pid_try in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-    if we_is_engine_pid "$engine_pid"; then
-      pid_ready=true
-      break
-    fi
-    kill -0 -- "$engine_pid" 2>/dev/null || break
-    sleep 0.05
-  done
-  if ! $pid_ready; then
-    we_transition_log "engine exec failed identity validation pid=$engine_pid"
-    if [[ -n $engine_start && $(we_proc_starttime "$engine_pid" 2>/dev/null || true) == "$engine_start" ]]; then
-      kill -TERM -- "$engine_pid" 2>/dev/null || true
-      sleep 0.1
-      if [[ $(we_proc_starttime "$engine_pid" 2>/dev/null || true) == "$engine_start" ]]; then
-        kill -KILL -- "$engine_pid" 2>/dev/null || true
-      fi
-    fi
-    we_overlay_end
-    we_jq_write '.active = false'
-    we_set_active_flag false
-    echo "Wallpaper Engine process did not start correctly; see $WE_LOG_FILE" >&2
-    we_notify "Wallpaper Engine failed to start"
-    return 1
-  fi
-  pid_tmp=$(mktemp "$WE_STATE_DIR/engine.pid.tmp.XXXXXX")
-  engine_start=$(we_proc_starttime "$engine_pid")
-  if [[ -z $engine_start ]]; then
-    rm -f "$pid_tmp"
-    we_overlay_end
-    we_jq_write '.active = false'
-    we_set_active_flag false
-    echo "Wallpaper Engine exited before its process identity could be recorded." >&2
-    we_notify "Wallpaper Engine failed to start"
-    return 1
-  fi
-  printf '%s %s\n' "$engine_pid" "$engine_start" >"$pid_tmp"
-  mv -f "$pid_tmp" "$WE_PID_FILE"
-
-  # Map ≠ first paint. Hide at hyprctl namespace/alpha reveals 100–600ms of
-  # black while shaders compile. Keep TO up; placeholder goes under LWE.
-  local -a wait_outputs=()
-  local live
-  while IFS= read -r live; do
-    [[ -n $live ]] || continue
-    we_name_in_list "$live" "${monitors[@]}" && wait_outputs+=("$live")
-  done < <(we_list_monitors 2>/dev/null || true)
-  if ((${#wait_outputs[@]} == 0)); then
-    wait_outputs=("${monitors[@]}")
-  fi
-
-  local painted=false
-  if we_wait_engine_layer "$WE_BG_LAYER_WAIT_MS" "${wait_outputs[@]}"; then
-    we_apply_placeholder
-    if we_wait_engine_first_paint "$WE_LWE_READY_MS"; then
-      painted=true
-    fi
-  else
-    we_transition_log "LWE did not map on ${wait_outputs[*]:-?}; holding overlay"
-    if we_wait_engine_first_paint "$WE_LWE_READY_MS"; then
-      painted=true
-    fi
-    if we_engine_layer_mapped "${wait_outputs[@]}"; then
-      we_apply_placeholder
-    fi
-  fi
-  # Safety invariant: this cosmetic full-screen overlay never outlives the
-  # bounded apply transaction. A static/black background on engine failure is
-  # preferable to making the entire desktop appear frozen indefinitely.
-  if ! $painted; then
-    we_transition_log "LWE did not produce a confirmed frame; hiding overlay and marking inactive"
-  fi
-  we_overlay_end
-  if $overlay_done && [[ -n $wipe_outputs && $wipe_outputs != '[]' ]]; then
-    we_remember_wipe_stills "$wipe_outputs"
-  fi
-  we_prune_transition_history
-
-  if ! $painted || ! we_engine_running; then
-    we_stop_engine
-    we_jq_write '.active = false'
-    we_set_active_flag false
-    we_notify "Wallpaper Engine failed to start"
-    we_transition_log "apply failed safely; overlay hidden and engine stopped"
-    return 1
-  fi
-
-  we_jq_write '.active = true'
-  we_set_active_flag true
-  we_notify "Wallpaper Engine applied"
-  we_transition_log "apply done; LWE mapped=yes"
-}
-
 we_revert_target_image() {
   local saved theme_bg first
   saved=$(we_jq -r '.saved_theme_background // empty')
@@ -2687,81 +2612,13 @@ we_revert_target_image() {
   return 1
 }
 
-we_revert_to_theme() {
-  we_bg_queue_enter
-  we_load_config
-  we_ensure_omarchy_background_enabled
-  we_transition_log "revert start plugin=$WE_PLUGIN_ROOT engine=$(we_engine_running && echo running || echo stopped)"
-
-  local target rc=0 wipe_outputs=""
-  target=$(we_revert_target_image 2>/dev/null || true)
-
-  # FROM cover first, then theme TO — never blocks stop/restore.
-  if [[ -n ${target:-} && -f $target ]]; then
-    if we_overlay_cover_then_to --theme; then
-      we_overlay_wait_done || we_transition_log "revert overlay done wait failed"
-    else
-      we_transition_log "revert overlay not ready; continuing with kill + theme set"
-    fi
-  fi
-
-  # Always kill via truncated comm (linux-wallpaper). Canvas/wipe failure
-  # must not skip this.
-  we_stop_engine
-  we_wait_engine_unmapped || true
-  we_jq_write '.active = false'
-  we_set_active_flag false
-
-  if [[ -z ${target:-} || ! -f $target ]]; then
-    echo "Could not find a theme background to restore." >&2
-    we_overlay_end
-    we_jq_write '.saved_theme_background = null'
-    we_clear_last_reveal
-    return 1
-  fi
-
-  local unique
-  unique=$(we_stage_transition_image "$target" "theme") || unique=$target
-  we_transition_log "revert omarchy-theme-bg-set $unique"
-  we_omarchy_bg_set "$unique" || rc=$?
-  we_overlay_end
-  we_jq_write '.saved_theme_background = null'
-  we_clear_last_reveal
-  we_prune_transition_history
-  if (( rc == 0 )); then
-    we_notify "Restored theme background"
-    we_transition_log "revert done"
-  else
-    we_transition_log "revert omarchy-theme-bg-set failed rc=$rc"
-  fi
-  return "$rc"
-}
-
-# Re-apply placeholder after a theme-set while WE is active (hook helper).
-we_on_theme_set() {
-  we_bg_queue_enter
-  we_load_config
-  local active
-  active=$(we_jq -r '.active // false')
-  [[ $active == true ]] || return 0
-
-  # Theme apply wrote a real background; remember it for revert, then cover again.
-  local bg
-  bg=$(we_current_theme_background)
-  if [[ -n $bg && -f $bg ]] && ! we_is_placeholder "$bg"; then
-    we_jq_write --arg p "$bg" '.saved_theme_background = $p'
-  fi
-  we_apply_placeholder
-}
-
 # ---------------------------------------------------------------------------
 # Reliable per-display runtime (v1.5+)
 #
 # A shared linux-wallpaperengine process couples every monitor: one unsupported
 # project terminates all wallpapers, and changing one display recreates every
 # layer surface. Keep one owned process per output and never involve the QML
-# transition service in apply/revert. The later definitions intentionally
-# replace the legacy all-display functions above while keeping their helpers.
+# transition service in apply/revert.
 
 we_runtime_log() {
   we_ensure_dirs
@@ -3204,6 +3061,10 @@ we_restore_current_theme_background() {
 we_apply_auto_theme() {
   we_bg_queue_enter
   we_load_config
+  if ! we_engine_running; then
+    echo "Auto-match requires a live Wallpaper Engine process owned by this plugin. Apply a wallpaper first." >&2
+    return 1
+  fi
   local monitor=${1:-} current previous source stage backup old_state applied_theme
   local previous_colors_hash="" previous_shell_hash="" previous_background_hash="" previous_background
   local last_applied wallpaper_override="" preferred_source=""

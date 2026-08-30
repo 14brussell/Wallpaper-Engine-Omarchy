@@ -1,40 +1,17 @@
 #!/usr/bin/env bash
-# Add or remove Wallpaper Engine entries in Omarchy's user menu extension.
-# Omarchy plugins deliberately have no install hooks, so this is explicit.
-#
-# Entries land under Style (stock root id: style), beside Theme / Background.
-# A JSONC `action` is a leaf — dotted children of that id are unreachable —
-# so revert / TUI are Style siblings (hyphenated), not nested under the GUI row:
-#   style.wallpaper-engine         → opens the Quickshell GUI panel
-#   style.wallpaper-engine-revert  → one-shot revert to theme background
-#   style.wallpaper-engine-tui     → optional gum TUI (advanced; not primary)
+# Structurally add or remove Wallpaper Engine entries in Omarchy's JSONC menu.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 action=${1:-install}
 menu_file=${WE_MENU_FILE:-$HOME/.config/omarchy/extensions/omarchy-menu.jsonc}
-marker='  // Added by wallpaper-engine-omarchy'
 
 plugin_id=io.github.14brussell.wallpaper-engine
 if [[ -f $ROOT/manifest.json ]]; then
   _id=$(sed -n 's/^[[:space:]]*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/manifest.json" | head -n1)
   [[ -n ${_id:-} ]] && plugin_id=$_id
 fi
-
-KEY_MAIN=style.wallpaper-engine
-KEY_REVERT=style.wallpaper-engine-revert
-KEY_TUI=style.wallpaper-engine-tui
-
-entry_main="  \"$KEY_MAIN\": {\"icon\":\"󰸉\",\"label\":\"Wallpaper Engine\",\"action\":\"omarchy-shell shell summon $plugin_id\",\"description\":\"Workshop wallpapers via linux-wallpaperengine (GUI)\",\"aliases\":[\"wallpaper-engine\",\"we\"]}"
-entry_revert="  \"$KEY_REVERT\": {\"icon\":\"󰕍\",\"label\":\"Revert to theme background\",\"action\":\"$ROOT/bin/we revert\",\"description\":\"Stop Wallpaper Engine and restore the Omarchy theme background\"}"
-entry_tui="  \"$KEY_TUI\": {\"icon\":\"󰆍\",\"label\":\"Wallpaper Engine (advanced TUI)\",\"action\":\"omarchy-launch-tui --app-id=org.omarchy.wallpaper-engine $ROOT/scripts/we-menu\",\"description\":\"Gum terminal UI fallback for Wallpaper Engine\"}"
-
-# Nested dotted ids (unreachable while the parent is an action) plus the
-# pre-GUI appearance.* id. Also matches current hyphenated sibling ids so
-# uninstall can clear either generation.
-OWNED_LINE_PATTERN='^[[:space:]]*"(appearance\.wallpaper-engine[^"]*|style\.wallpaper-engine([.-](revert|tui))?)"[[:space:]]*:'
-LEGACY_NESTED_PATTERN='^[[:space:]]*"(appearance\.wallpaper-engine[^"]*|style\.wallpaper-engine\.(revert|tui))"[[:space:]]*:'
 
 usage() {
   echo "Usage: we-menu-entry [install|remove]" >&2
@@ -47,162 +24,385 @@ refresh_menu() {
   timeout -k 1 3 omarchy-shell shell call omarchy.menu refresh "" >/dev/null 2>&1 || true
 }
 
-key_pattern() {
-  local id=$1
-  printf '^[[:space:]]*"%s"[[:space:]]*:' "${id//./\\.}"
-}
-
-# Ensure the last non-comment content line before the closing brace ends with a comma.
-ensure_trailing_comma_before() {
-  local -n _lines=$1
-  local closing=$2
-  local i line
-  for (( i = closing - 1; i >= 0; i-- )); do
-    line=${_lines[$i]}
-    [[ $line =~ ^[[:space:]]*$ || $line =~ ^[[:space:]]*// ]] && continue
-    if [[ ! $line =~ \{[[:space:]]*$ && ! $line =~ ,[[:space:]]*$ ]]; then
-      _lines[$i]="$line,"
-    fi
-    break
-  done
-}
-
-find_closing_brace() {
-  local -n _lines=$1
-  local i
-  for (( i = ${#_lines[@]} - 1; i >= 0; i-- )); do
-    if [[ ${_lines[$i]} =~ ^[[:space:]]*\}[[:space:]]*$ ]]; then
-      printf '%s\n' "$i"
-      return 0
-    fi
-  done
-  return 1
-}
-
-entry_present() {
-  local key=$1
-  [[ -f $menu_file ]] || return 1
-  grep -Eq "$(key_pattern "$key")" "$menu_file"
-}
-
-strip_lines_matching() {
-  local pattern=$1
-  local drop_marker=${2:-0}
-  [[ -f $menu_file ]] || return 0
-  mapfile -t lines <"$menu_file"
-  local tmp line
-  tmp=$(mktemp "${menu_file}.tmp.XXXXXX")
-  for line in "${lines[@]}"; do
-    if (( drop_marker )) && [[ $line == "$marker" ]]; then
-      continue
-    fi
-    [[ $line =~ $pattern ]] && continue
-    printf '%s\n' "$line"
-  done >"$tmp"
-  mv "$tmp" "$menu_file"
-}
-
-strip_legacy_nested() {
-  strip_lines_matching "$LEGACY_NESTED_PATTERN" 0
-}
-
-# Replace an existing JSONC entry line for key, or no-op if missing.
-replace_entry_line() {
-  local key=$1
-  local new_line=$2
-  mapfile -t lines <"$menu_file"
-  local tmp i updated=0
-  tmp=$(mktemp "${menu_file}.tmp.XXXXXX")
-  local pattern
-  pattern=$(key_pattern "$key")
-  for (( i = 0; i < ${#lines[@]}; i++ )); do
-    if [[ ${lines[$i]} =~ $pattern ]]; then
-      local out=$new_line
-      if [[ ${lines[$i]} =~ ,[[:space:]]*$ && ! $out =~ ,[[:space:]]*$ ]]; then
-        out="$out,"
-      fi
-      printf '%s\n' "$out"
-      updated=1
-    else
-      printf '%s\n' "${lines[$i]}"
-    fi
-  done >"$tmp"
-  mv "$tmp" "$menu_file"
-  return $(( updated == 0 ))
-}
-
-insert_before_closing() {
-  local new_block=$1
-  mapfile -t lines <"$menu_file"
-  local closing
-  closing=$(find_closing_brace lines) || {
-    echo "Could not find the menu object's closing brace" >&2
-    exit 1
-  }
-  ensure_trailing_comma_before lines "$closing"
-
-  local tmp
-  tmp=$(mktemp "${menu_file}.tmp.XXXXXX")
-  local i
-  for (( i = 0; i < ${#lines[@]}; i++ )); do
-    if (( i == closing )); then
-      printf '%s\n' "$new_block"
-    fi
-    printf '%s\n' "${lines[$i]}"
-  done >"$tmp"
-  mv "$tmp" "$menu_file"
-}
-
-upsert_entry() {
-  local key=$1
-  local line=$2
-  if entry_present "$key"; then
-    replace_entry_line "$key" "$line" && changed=1 || true
-  else
-    insert_before_closing "$line"
-    added=1
-  fi
-}
-
-install_entry() {
-  mkdir -p "$(dirname -- "$menu_file")"
-  if [[ ! -f $menu_file ]]; then
-    printf '{\n%s\n%s,\n%s,\n%s\n}\n' "$marker" "$entry_main" "$entry_revert" "$entry_tui" >"$menu_file"
-    refresh_menu
-    echo "Installed menu entries → $menu_file"
-    return
-  fi
-
-  strip_legacy_nested
-
-  added=0
-  changed=0
-  if entry_present "$KEY_MAIN"; then
-    replace_entry_line "$KEY_MAIN" "$entry_main" && changed=1 || true
-  else
-    insert_before_closing "$(printf '%s\n%s' "$marker" "$entry_main")"
-    added=1
-  fi
-  upsert_entry "$KEY_REVERT" "$entry_revert"
-  upsert_entry "$KEY_TUI" "$entry_tui"
-
-  if (( added || changed )); then
-    refresh_menu
-    echo "Installed menu entries → $menu_file"
-  else
-    echo "Menu entries already present."
-  fi
-}
-
-remove_entry() {
-  [[ -f $menu_file ]] || return
-  strip_lines_matching "$OWNED_LINE_PATTERN" 1
-  refresh_menu
-  echo "Removed menu entries from $menu_file"
-}
-
-case "$action" in
-  install) install_entry ;;
-  remove) remove_entry ;;
+case $action in
+  install|remove) ;;
   *) usage ;;
 esac
+
+if [[ $action == remove && ! -f $menu_file ]]; then
+  exit 0
+fi
+
+mkdir -p "$(dirname -- "$menu_file")"
+
+# Actions are shell command strings consumed by Omarchy. Quote every dynamic
+# path/id before JSON encoding so spaces and shell metacharacters remain data.
+printf -v main_command 'omarchy-shell shell summon %q' "$plugin_id"
+printf -v revert_command '%q revert' "$ROOT/bin/we"
+printf -v tui_command 'omarchy-launch-tui --app-id=%q %q' \
+  org.omarchy.wallpaper-engine "$ROOT/scripts/we-menu"
+
+export WE_MENU_MAIN_COMMAND=$main_command
+export WE_MENU_REVERT_COMMAND=$revert_command
+export WE_MENU_TUI_COMMAND=$tui_command
+
+# Python is used only as a JSONC-aware structural editor. It validates both the
+# original and replacement documents, preserves unrelated text/comments, and
+# atomically replaces the file only after the result parses successfully.
+python3 - "$action" "$menu_file" <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+import tempfile
+
+action, path = sys.argv[1:]
+marker_text = "Added by wallpaper-engine-omarchy"
+current_keys = {
+    "style.wallpaper-engine",
+    "style.wallpaper-engine-revert",
+    "style.wallpaper-engine-tui",
+}
+
+
+def clean_jsonc(source):
+    out = list(source)
+    i = 0
+    in_string = False
+    escaped = False
+    while i < len(source):
+        char = source[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            i += 1
+            continue
+        if char == '"':
+            in_string = True
+            i += 1
+            continue
+        if source.startswith("//", i):
+            end = source.find("\n", i)
+            if end < 0:
+                end = len(source)
+            for pos in range(i, end):
+                out[pos] = " "
+            i = end
+            continue
+        if source.startswith("/*", i):
+            end = source.find("*/", i + 2)
+            if end < 0:
+                raise ValueError("unterminated block comment")
+            for pos in range(i, end + 2):
+                if out[pos] != "\n":
+                    out[pos] = " "
+            i = end + 2
+            continue
+        i += 1
+
+    cleaned = "".join(out)
+    chars = list(cleaned)
+    in_string = False
+    escaped = False
+    for i, char in enumerate(cleaned):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == ",":
+            j = i + 1
+            while j < len(cleaned) and cleaned[j].isspace():
+                j += 1
+            if j < len(cleaned) and cleaned[j] in "}]":
+                chars[i] = " "
+    return "".join(chars)
+
+
+def parse(source):
+    try:
+        value = json.loads(clean_jsonc(source))
+    except (json.JSONDecodeError, ValueError) as error:
+        raise SystemExit(f"Refusing to modify invalid JSONC menu {path}: {error}")
+    if not isinstance(value, dict):
+        raise SystemExit(f"Refusing to modify menu whose root is not an object: {path}")
+    if "items" in value and not isinstance(value["items"], dict):
+        raise SystemExit(f"Refusing to modify menu whose 'items' member is not an object: {path}")
+    return value
+
+
+def skip_trivia(source, pos, limit):
+    while pos < limit:
+        if source[pos].isspace():
+            pos += 1
+        elif source.startswith("//", pos):
+            newline = source.find("\n", pos)
+            pos = limit if newline < 0 else newline + 1
+        elif source.startswith("/*", pos):
+            end = source.find("*/", pos + 2)
+            if end < 0:
+                raise ValueError("unterminated block comment")
+            pos = end + 2
+        else:
+            break
+    return pos
+
+
+def string_end(source, pos):
+    assert source[pos] == '"'
+    pos += 1
+    escaped = False
+    while pos < len(source):
+        char = source[pos]
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            return pos + 1
+        pos += 1
+    raise ValueError("unterminated string")
+
+
+def matching_close(source, opening):
+    pairs = {"{": "}", "[": "]"}
+    stack = [pairs[source[opening]]]
+    pos = opening + 1
+    while pos < len(source):
+        if source[pos] == '"':
+            pos = string_end(source, pos)
+        elif source.startswith("//", pos):
+            newline = source.find("\n", pos)
+            pos = len(source) if newline < 0 else newline + 1
+        elif source.startswith("/*", pos):
+            end = source.find("*/", pos + 2)
+            if end < 0:
+                raise ValueError("unterminated block comment")
+            pos = end + 2
+        elif source[pos] in pairs:
+            stack.append(pairs[source[pos]])
+            pos += 1
+        elif source[pos] == stack[-1]:
+            stack.pop()
+            if not stack:
+                return pos
+            pos += 1
+        else:
+            pos += 1
+    raise ValueError("unterminated object or array")
+
+
+def value_end(source, pos, object_close):
+    pos = skip_trivia(source, pos, object_close)
+    if source[pos] in "{[":
+        return matching_close(source, pos) + 1
+    if source[pos] == '"':
+        return string_end(source, pos)
+    end = pos
+    while end < object_close and source[end] not in ",}":
+        if source.startswith("//", end) or source.startswith("/*", end):
+            break
+        end += 1
+    while end > pos and source[end - 1].isspace():
+        end -= 1
+    return end
+
+
+def members(source, opening):
+    close = matching_close(source, opening)
+    result = []
+    pos = opening + 1
+    while True:
+        pos = skip_trivia(source, pos, close)
+        if pos >= close:
+            break
+        key_start = pos
+        if source[pos] != '"':
+            raise ValueError(f"expected quoted object key near byte {pos}")
+        key_end = string_end(source, pos)
+        key = json.loads(source[key_start:key_end])
+        pos = skip_trivia(source, key_end, close)
+        if pos >= close or source[pos] != ":":
+            raise ValueError(f"expected ':' after key {key!r}")
+        start_value = skip_trivia(source, pos + 1, close)
+        end_value = value_end(source, start_value, close)
+        after = skip_trivia(source, end_value, close)
+        comma = after if after < close and source[after] == "," else None
+        result.append({
+            "key": key,
+            "key_start": key_start,
+            "value_start": start_value,
+            "value_end": end_value,
+            "comma": comma,
+        })
+        pos = comma + 1 if comma is not None else after
+        if comma is None and pos < close:
+            raise ValueError(f"expected ',' after key {key!r}")
+    return result, close
+
+
+def root_open(source):
+    opening = skip_trivia(source, 0, len(source))
+    if opening >= len(source) or source[opening] != "{":
+        raise ValueError("root object opening brace not found")
+    return opening
+
+
+def target_object(source, parsed):
+    root = root_open(source)
+    root_members, _ = members(source, root)
+    if isinstance(parsed.get("items"), dict):
+        item = next(member for member in root_members if member["key"] == "items")
+        if source[item["value_start"]] != "{":
+            raise ValueError("'items' is not represented by an object")
+        return item["value_start"], parsed["items"]
+    return root, parsed
+
+
+def legacy_owned(key, value):
+    if not re.fullmatch(r"(?:appearance\.wallpaper-engine[^\"]*|style\.wallpaper-engine[.](?:revert|tui))", key):
+        return False
+    if not isinstance(value, dict) or not isinstance(value.get("action"), str):
+        return False
+    command = value["action"]
+    return (
+        "summon io.github.14brussell.wallpaper-engine" in command
+        or "summon wallpaper-engine-omarchy" in command
+        or "/bin/we revert" in command
+        or "/scripts/we-menu" in command
+    )
+
+
+def remove_owned(source):
+    parsed = parse(source)
+    opening, target = target_object(source, parsed)
+    target_members, _ = members(source, opening)
+    ranges = []
+    for member in target_members:
+        key = member["key"]
+        value = target.get(key)
+        if key in current_keys or legacy_owned(key, value):
+            end = member["comma"] + 1 if member["comma"] is not None else member["value_end"]
+            ranges.append((member["key_start"], end))
+    for start, end in reversed(ranges):
+        source = source[:start] + source[end:]
+    source = re.sub(
+        rf"(?m)^[ \t]*//[ \t]*{re.escape(marker_text)}[ \t]*\r?\n?",
+        "",
+        source,
+    )
+    parse(source)
+    return source
+
+
+def install_entries(source):
+    source = remove_owned(source)
+    parsed = parse(source)
+    opening, _ = target_object(source, parsed)
+    target_members, close = members(source, opening)
+
+    entries = [
+        ("style.wallpaper-engine", {
+            "icon": "󰸉",
+            "label": "Wallpaper Engine",
+            "action": os.environ["WE_MENU_MAIN_COMMAND"],
+            "description": "Workshop wallpapers via linux-wallpaperengine (GUI)",
+            "aliases": ["wallpaper-engine", "we"],
+        }),
+        ("style.wallpaper-engine-revert", {
+            "icon": "󰕍",
+            "label": "Revert to theme background",
+            "action": os.environ["WE_MENU_REVERT_COMMAND"],
+            "description": "Stop Wallpaper Engine and restore the Omarchy theme background",
+        }),
+        ("style.wallpaper-engine-tui", {
+            "icon": "󰆍",
+            "label": "Wallpaper Engine (advanced TUI)",
+            "action": os.environ["WE_MENU_TUI_COMMAND"],
+            "description": "Gum terminal UI fallback for Wallpaper Engine",
+        }),
+    ]
+
+    close_line_start = source.rfind("\n", 0, close) + 1
+    close_prefix = source[close_line_start:close]
+    if close_prefix.strip():
+        close_line_start = close
+        close_prefix = ""
+    if target_members:
+        first_line = source.rfind("\n", 0, target_members[0]["key_start"]) + 1
+        indent = source[first_line:target_members[0]["key_start"]]
+        if indent.strip():
+            indent = close_prefix + "  "
+    else:
+        indent = close_prefix + "  "
+
+    rendered = [indent + "// " + marker_text]
+    for key, value in entries:
+        rendered.append(
+            indent + json.dumps(key, ensure_ascii=False) + ": "
+            + json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        )
+    block = rendered[0] + "\n" + ",\n".join(rendered[1:])
+
+    additions = []
+    if target_members and target_members[-1]["comma"] is None:
+        additions.append((target_members[-1]["value_end"], ","))
+    if close_line_start == close:
+        block = "\n" + block + "\n" + close_prefix
+        additions.append((close, block))
+    else:
+        additions.append((close_line_start, block + "\n"))
+    for pos, content in sorted(additions, reverse=True):
+        source = source[:pos] + content + source[pos:]
+    parse(source)
+    return source
+
+
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        original = handle.read()
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+else:
+    original = "{}\n"
+    mode = 0o644
+
+parse(original)
+updated = install_entries(original) if action == "install" else remove_owned(original)
+if updated == original:
+    sys.exit(0)
+
+directory = os.path.dirname(path) or "."
+descriptor, temporary = tempfile.mkstemp(prefix=".omarchy-menu.", suffix=".jsonc", dir=directory)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(updated)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, mode)
+    with open(temporary, "r", encoding="utf-8") as handle:
+        parse(handle.read())
+    os.replace(temporary, path)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+
+refresh_menu
+if [[ $action == install ]]; then
+  echo "Installed menu entries → $menu_file"
+else
+  echo "Removed menu entries from $menu_file"
+fi

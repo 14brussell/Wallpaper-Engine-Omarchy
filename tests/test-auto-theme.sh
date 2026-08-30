@@ -27,7 +27,7 @@ cat >"$STUB_BIN/omarchy" <<'EOF'
 set -euo pipefail
 [[ ${1:-} == theme && ${2:-} == set && -n ${3:-} ]] || exit 2
 slug=$3
-user_theme="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/themes/$slug"
+user_theme="$HOME/.config/omarchy/themes/$slug"
 [[ -d $user_theme ]] || exit 1
 current="$HOME/.local/state/omarchy/current"
 next_theme="$current/next-theme"
@@ -200,7 +200,7 @@ reset_ipc_log() {
 }
 
 start_fake_engine() {
-  "$STUB_BIN/linux-wallpaperengine" 30 &
+  "$STUB_BIN/linux-wallpaperengine" 300 &
   fake_engine_pid=$!
   local start
   start=$(awk '{print $22}' "/proc/$fake_engine_pid/stat")
@@ -208,6 +208,14 @@ start_fake_engine() {
     >"$TEST_HOME/.local/state/omarchy/wallpaper-engine/pids/DP-1.pid"
   jq '.active = true' "$config" >"$tmp"
   mv "$tmp" "$config"
+}
+
+stop_fake_engine() {
+  if [[ -n $fake_engine_pid ]]; then
+    kill "$fake_engine_pid" 2>/dev/null || true
+    wait "$fake_engine_pid" 2>/dev/null || true
+    fake_engine_pid=""
+  fi
 }
 
 env_cmd=(
@@ -244,6 +252,12 @@ mv "$tmp" "$config"
 # With no monitor argument, auto-match must use the most recently successfully
 # applied wallpaper rather than the first configured or currently selected tab.
 reset_ipc_log
+if "${env_cmd[@]}" "$ROOT/bin/we" auto-theme DP-1 >/dev/null 2>&1; then
+  fail 'auto-theme started without a live plugin-owned engine process'
+fi
+jq -e '.auto_theme.active == false' "$config" >/dev/null \
+  || fail 'rejected auto-theme changed lifecycle state'
+start_fake_engine
 "${env_cmd[@]}" "$ROOT/bin/we" auto-theme >/dev/null
 generated="$TEST_HOME/.config/omarchy/themes/wallpaper-engine-auto-match"
 [[ -f $generated/colors.toml ]] || fail 'colors.toml was not generated'
@@ -269,6 +283,7 @@ jq -e --arg key "$current_wallpaper_key" \
 # A stale config can claim active=true after the owned engine has already died.
 # Undo must trust PID identity, not that flag, or the theme hook parks the black
 # placeholder after the prior theme has otherwise been restored.
+stop_fake_engine
 "${env_cmd[@]}" "$ROOT/bin/we" undo-auto-theme >/dev/null
 assert_restored_theme 'undo-auto-theme with stale active state'
 jq -e '.active == false and .auto_theme.active == false' "$config" >/dev/null \
@@ -278,8 +293,10 @@ jq -e '.active == false and .auto_theme.active == false' "$config" >/dev/null \
 # is active it must restore the complete previous theme, not merely stop the
 # engine and expose the generated theme's wallpaper as a frozen-looking still.
 reset_ipc_log
+start_fake_engine
 "${env_cmd[@]}" "$ROOT/bin/we" auto-theme DP-1 >/dev/null
 "${env_cmd[@]}" "$ROOT/bin/we" revert >/dev/null
+stop_fake_engine
 assert_restored_theme 'revert'
 jq -e '.auto_theme.active == false and .auto_theme.previous_theme == null' "$config" >/dev/null \
   || fail 'revert did not clear auto-theme undo state'
@@ -288,15 +305,19 @@ jq -e '.auto_theme.active == false and .auto_theme.previous_theme == null' "$con
 # generated theme's parked background would otherwise be exposed as a blank
 # desktop after the live wallpaper disappears.
 reset_ipc_log
+start_fake_engine
 "${env_cmd[@]}" "$ROOT/bin/we" auto-theme DP-1 >/dev/null
 "${env_cmd[@]}" "$ROOT/bin/we" stop DP-1 >/dev/null
+stop_fake_engine
 assert_restored_theme 'stopping Wallpaper Engine'
 jq -e '.auto_theme.active == false and .auto_theme.previous_theme == null' "$config" >/dev/null \
   || fail 'stopping Wallpaper Engine did not clear auto-theme undo state'
 
 # The explicit undo action remains available while auto-match is active.
 reset_ipc_log
+start_fake_engine
 "${env_cmd[@]}" "$ROOT/bin/we" auto-theme DP-1 >/dev/null
+stop_fake_engine
 "${env_cmd[@]}" "$ROOT/bin/we" undo-auto-theme >/dev/null
 assert_restored_theme 'undo-auto-theme'
 jq -e '.auto_theme.active == false and .auto_theme.previous_theme == null' "$config" >/dev/null \
@@ -306,7 +327,9 @@ jq -e '.auto_theme.active == false and .auto_theme.previous_theme == null' "$con
 # undo metadata visible for retry, but repair the stopped desktop background
 # before returning the failure.
 reset_ipc_log
+start_fake_engine
 "${env_cmd[@]}" "$ROOT/bin/we" auto-theme DP-1 >/dev/null
+stop_fake_engine
 if "${env_cmd[@]}" "WE_TEST_FAIL_APPLY_AT=3" \
     "$ROOT/bin/we" undo-auto-theme >/dev/null 2>&1; then
   fail 'undo-auto-theme ignored a failed shell palette confirmation'
@@ -337,8 +360,7 @@ jq -e '.active == true and .auto_theme.active == false
     == "$(sha256sum "$original_background" | cut -d' ' -f1)" ]] \
   || fail 'live-engine undo saved the wrong background target'
 "${env_cmd[@]}" "$ROOT/bin/we" revert >/dev/null
-wait "$fake_engine_pid" 2>/dev/null || true
-fake_engine_pid=""
+stop_fake_engine
 assert_restored_theme 'revert after live-engine undo'
 jq -e '.active == false and .auto_theme.active == false
   and .saved_theme_background == null' "$config" >/dev/null \
@@ -371,6 +393,7 @@ chmod +x "$generator"
 jq '.active = true' "$config" >"$tmp"
 mv "$tmp" "$config"
 reset_ipc_log
+start_fake_engine
 "${env_cmd[@]}" \
   "WE_THEME_GENERATOR=$generator" \
   "WE_TEST_GENERATOR_STARTED=$generator_started" \
@@ -391,6 +414,7 @@ kill -0 "$revert_pid" 2>/dev/null \
 : >"$generator_release"
 wait "$auto_pid" || fail 'blocked auto-theme transaction failed'
 wait "$revert_pid" || fail 'queued revert transaction failed'
+stop_fake_engine
 assert_restored_theme 'queued revert after auto-match race'
 jq -e '.active == false and .auto_theme.active == false
   and .auto_theme.previous_theme == null and .saved_theme_background == null' \

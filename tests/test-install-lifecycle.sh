@@ -147,13 +147,15 @@ test_auto_match_hint_is_concise() {
     || fail 'new auto-match does not reject stale clicks while the engine is stopped'
 }
 
-test_save_apply_status_stays_in_button() {
+test_save_apply_status_is_stable_and_separate() {
   grep -A8 -F 'id: saveApplyButton' "$ROOT/DisplayTab.qml" \
-    | grep -Fq 'text: root.saveApplyStatus.length' \
-    || fail 'Save & apply does not expose status through its button label'
-  ! grep -Fq 'visible: root.busy || root.localStatus.length > 0' \
+    | grep -Fq 'text: "Save & apply"' \
+    || fail 'Save & apply does not keep a stable action label'
+  grep -Fq 'visible: root.saveApplyStatus.length > 0' "$ROOT/DisplayTab.qml" \
+    || fail 'display action status is not exposed separately from the action label'
+  grep -Fq 'if (root.saveApplyState === "error") return "Error: "' \
     "$ROOT/DisplayTab.qml" \
-    || fail 'display action status still adds a layout-shifting row'
+    || fail 'display action errors do not expose explicit severity'
   ! grep -Fq 'visible: !root.busy && root.wallpaperSelected && !root.engineRunning' \
     "$ROOT/DisplayTab.qml" \
     || fail 'Save & apply still hides guidance and shifts layout while busy'
@@ -317,6 +319,247 @@ test_uninstall_validates_all_paths_before_purge() {
   assert_exists "$unsafe"
 }
 
+test_purge_fails_closed_when_controller_fails() {
+  local home="$TEST_ROOT/failed-controller-home"
+  local output="$TEST_ROOT/failed-controller-output"
+  seed_plugin_data "$home"
+  mkdir -p "$home/hooks/post-boot.d" "$home/hooks/theme-set.d" "$home/bin"
+  printf '#!/usr/bin/env bash\n# wallpaper-engine-omarchy\nexit 0\n' \
+    >"$home/hooks/post-boot.d/50-wallpaper-engine"
+  printf '#!/usr/bin/env bash\n# wallpaper-engine-omarchy\nexit 0\n' \
+    >"$home/hooks/theme-set.d/50-wallpaper-engine"
+  printf '{"style.wallpaper-engine":{"action":"omarchy-shell shell summon %s"}}\n' \
+    "$PLUGIN_ID" >"$home/menu.jsonc"
+  ln -s "$ROOT/bin/we" "$home/bin/omarchy-we"
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$home/controller"
+  chmod +x "$home/controller"
+
+  if HOME=$home \
+    WE_HOOKS_ROOT="$home/hooks" \
+    WE_MENU_FILE="$home/menu.jsonc" \
+    WE_BIN_DIR="$home/bin" \
+    WE_CONTROLLER="$home/controller" \
+    WE_SKIP_MENU_REFRESH=1 \
+    "$ROOT/scripts/uninstall.sh" --purge >"$output" 2>&1; then
+    fail 'purge continued after controller shutdown could not be confirmed'
+  fi
+
+  grep -Fq 'Purge cancelled:' "$output" \
+    || fail 'failed-closed purge did not explain why it stopped'
+  assert_exists "$home/.config/omarchy/wallpaper-engine/config.json"
+  assert_exists "$home/.local/state/omarchy/wallpaper-engine/state"
+  assert_exists "$home/hooks/post-boot.d/50-wallpaper-engine"
+  assert_exists "$home/hooks/theme-set.d/50-wallpaper-engine"
+  assert_exists "$home/menu.jsonc"
+  assert_exists "$home/bin/omarchy-we"
+  grep -Fq 'style.wallpaper-engine' "$home/menu.jsonc" \
+    || fail 'failed purge removed the menu integration'
+}
+
+test_hooks_are_current_source_wrappers() {
+  local home="$TEST_ROOT/hook-wrapper-home"
+  local hooks="$home/.config/omarchy/hooks"
+  mkdir -p "$home"
+
+  HOME=$home WE_SKIP_MENU_REFRESH=1 "$ROOT/scripts/install-hooks" install >/dev/null
+  for hook in \
+    "$hooks/post-boot.d/50-wallpaper-engine" \
+    "$hooks/theme-set.d/50-wallpaper-engine"; do
+    assert_exists "$hook"
+    grep -Fqx '# wallpaper-engine-omarchy' "$hook" \
+      || fail "installed hook has no ownership marker: $hook"
+    grep -Fq 'exec "$HOOK_SOURCE" "$@"' "$hook" \
+      || fail "installed hook is a copied snapshot instead of a wrapper: $hook"
+    [[ $(wc -l <"$hook") -lt 12 ]] \
+      || fail "installed hook unexpectedly contains a copied hook body: $hook"
+  done
+
+  printf '#!/usr/bin/env bash\n# user hook\n' \
+    >"$hooks/post-boot.d/50-wallpaper-engine"
+  HOME=$home "$ROOT/scripts/install-hooks" remove >/dev/null 2>&1
+  assert_exists "$hooks/post-boot.d/50-wallpaper-engine"
+  assert_absent "$hooks/theme-set.d/50-wallpaper-engine"
+}
+
+test_canonical_home_paths_ignore_xdg_overrides() {
+  local home="$TEST_ROOT/canonical-home"
+  local xdg="$TEST_ROOT/noncanonical-xdg"
+  mkdir -p "$home" "$xdg"
+
+  HOME=$home XDG_CONFIG_HOME="$xdg/config" XDG_STATE_HOME="$xdg/state" \
+    WE_SKIP_MENU_REFRESH=1 "$ROOT/scripts/install-hooks" install >/dev/null
+  HOME=$home XDG_CONFIG_HOME="$xdg/config" XDG_STATE_HOME="$xdg/state" \
+    WE_SKIP_MENU_REFRESH=1 "$ROOT/scripts/we-menu-entry" install >/dev/null
+
+  assert_exists "$home/.config/omarchy/hooks/post-boot.d/50-wallpaper-engine"
+  assert_exists "$home/.config/omarchy/extensions/omarchy-menu.jsonc"
+  assert_absent "$xdg/config/omarchy"
+  ! rg -n 'XDG_(CONFIG|STATE)_HOME' \
+    "$ROOT/scripts/install.sh" "$ROOT/scripts/uninstall.sh" \
+    "$ROOT/scripts/install-hooks" "$ROOT/scripts/we-menu-entry" >/dev/null \
+    || fail 'lifecycle scripts still split canonical paths through XDG overrides'
+}
+
+test_menu_editor_handles_multiline_and_items_jsonc() {
+  local home="$TEST_ROOT/menu-jsonc-home"
+  local menu="$home/menu.jsonc"
+  local flat="$home/flat-menu.jsonc"
+  local before_bad after_bad
+  mkdir -p "$home"
+  printf '%s\n' \
+    '{' \
+    '  // root comment survives' \
+    '  "items": {' \
+    '    // custom comment survives' \
+    '    "custom.entry": {' \
+    '      "label": "Keep me",' \
+    '      "action": "printf keep"' \
+    '    },' \
+    '    "appearance.wallpaper-engine.revert": {' \
+    '      "label": "Legacy",' \
+    '      "action": "/old plugin/bin/we revert"' \
+    '    },' \
+    '  },' \
+    '  "metadata": {"enabled": true},' \
+    '}' >"$menu"
+
+  HOME=$home WE_MENU_FILE=$menu WE_SKIP_MENU_REFRESH=1 \
+    "$ROOT/scripts/we-menu-entry" install >/dev/null
+  [[ $(grep -c '"style.wallpaper-engine"' "$menu") -eq 1 ]] \
+    || fail 'menu install did not create exactly one GUI entry'
+  grep -Fq '// root comment survives' "$menu" \
+    || fail 'menu install removed a root comment'
+  grep -Fq '// custom comment survives' "$menu" \
+    || fail 'menu install removed an items comment'
+  grep -Fq '"metadata": {"enabled": true}' "$menu" \
+    || fail 'menu install changed an unrelated root member'
+  ! grep -Fq 'appearance.wallpaper-engine.revert' "$menu" \
+    || fail 'menu install retained a multiline legacy entry'
+
+  HOME=$home WE_MENU_FILE=$menu WE_SKIP_MENU_REFRESH=1 \
+    "$ROOT/scripts/we-menu-entry" remove >/dev/null
+  ! grep -Fq 'style.wallpaper-engine' "$menu" \
+    || fail 'menu remove retained a plugin entry'
+  grep -Fq '"custom.entry"' "$menu" \
+    || fail 'menu remove deleted an unrelated entry'
+  grep -Fq '// custom comment survives' "$menu" \
+    || fail 'menu remove deleted an unrelated comment'
+
+  printf '%s\n' \
+    '{' \
+    '  // flat-shape comment survives' \
+    '  "custom.flat": {' \
+    '    "label": "Keep flat",' \
+    '    "action": "printf flat"' \
+    '  }' \
+    '}' >"$flat"
+  HOME=$home WE_MENU_FILE=$flat WE_SKIP_MENU_REFRESH=1 \
+    "$ROOT/scripts/we-menu-entry" install >/dev/null
+  grep -Fq '"style.wallpaper-engine"' "$flat" \
+    || fail 'menu install did not support the flat JSONC shape'
+  HOME=$home WE_MENU_FILE=$flat WE_SKIP_MENU_REFRESH=1 \
+    "$ROOT/scripts/we-menu-entry" remove >/dev/null
+  grep -Fq '"custom.flat"' "$flat" \
+    || fail 'menu remove damaged the flat JSONC shape'
+  grep -Fq '// flat-shape comment survives' "$flat" \
+    || fail 'menu remove deleted a flat-shape comment'
+
+  printf '{ "items": { "broken": [ } }\n' >"$menu"
+  before_bad=$(sha256sum "$menu" | cut -d' ' -f1)
+  if HOME=$home WE_MENU_FILE=$menu WE_SKIP_MENU_REFRESH=1 \
+      "$ROOT/scripts/we-menu-entry" install >/dev/null 2>&1; then
+    fail 'menu editor accepted malformed JSONC'
+  fi
+  after_bad=$(sha256sum "$menu" | cut -d' ' -f1)
+  [[ $before_bad == "$after_bad" ]] \
+    || fail 'menu editor changed malformed JSONC before validation failed'
+}
+
+test_menu_actions_quote_plugin_paths() {
+  local spaced_root="$TEST_ROOT/plugin path with spaces"
+  local menu="$TEST_ROOT/spaced-menu.jsonc"
+  mkdir -p "$spaced_root/scripts" "$spaced_root/bin"
+  cp "$ROOT/manifest.json" "$spaced_root/manifest.json"
+  cp "$ROOT/scripts/we-menu-entry" "$spaced_root/scripts/we-menu-entry"
+  cp "$ROOT/scripts/we-menu" "$spaced_root/scripts/we-menu"
+  cp "$ROOT/bin/we" "$spaced_root/bin/we"
+  chmod +x "$spaced_root/scripts/we-menu-entry"
+
+  HOME="$TEST_ROOT/spaced-home" WE_MENU_FILE=$menu WE_SKIP_MENU_REFRESH=1 \
+    "$spaced_root/scripts/we-menu-entry" install >/dev/null
+  grep -Fq 'plugin\\ path\\ with\\ spaces/bin/we revert' "$menu" \
+    || fail 'menu action did not shell-quote a controller path containing spaces'
+  grep -Fq 'plugin\\ path\\ with\\ spaces/scripts/we-menu' "$menu" \
+    || fail 'menu action did not shell-quote a TUI path containing spaces'
+}
+
+test_in_place_install_is_staged_and_generation_stamped() {
+  local home="$TEST_ROOT/in-place-home"
+  local dest="$home/.config/omarchy/plugins/$PLUGIN_ID"
+  local stub_bin="$home/stubs"
+  local restart_log="$home/restart.log"
+  mkdir -p "$(dirname -- "$dest")" "$stub_bin"
+  cp -a "$ROOT/." "$dest/"
+  mkdir -p "$home/.config/omarchy"
+  printf '{"widgets":[{"id":"%s"}]}\n' "$PLUGIN_ID" \
+    >"$home/.config/omarchy/shell.json"
+  printf '#!/usr/bin/env bash\nprintf restart >"$WE_TEST_RESTART_LOG"\n' \
+    >"$stub_bin/omarchy-restart-shell"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "${1#wallpaper-engine-generation-}"\n' \
+    >"$stub_bin/omarchy-shell"
+  chmod +x "$stub_bin/omarchy-restart-shell" "$stub_bin/omarchy-shell"
+
+  HOME=$home \
+    PATH="$stub_bin:$PATH" \
+    WE_TEST_RESTART_LOG=$restart_log \
+    XDG_CONFIG_HOME="$TEST_ROOT/in-place-wrong-config" \
+    XDG_STATE_HOME="$TEST_ROOT/in-place-wrong-state" \
+    WE_SKIP_MENU_REFRESH=1 \
+    "$dest/scripts/install.sh" >/dev/null
+
+  ! grep -Fq '__WE_BUILD_GENERATION__' "$dest/Service.qml" \
+    || fail 'canonical in-place install skipped generation stamping'
+  grep -Eq 'readonly property string buildGeneration: "[0-9]+-' "$dest/Service.qml" \
+    || fail 'canonical in-place install did not create a concrete generation'
+  assert_exists "$restart_log"
+  assert_exists "$home/.local/state/omarchy/wallpaper-engine/transition.lock"
+  assert_absent "$TEST_ROOT/in-place-wrong-config/omarchy"
+  assert_absent "$TEST_ROOT/in-place-wrong-state/omarchy"
+}
+
+test_qml_validation_is_explicit_about_syntax() {
+  grep -Fq -- '--json "$lint_json"' "$ROOT/scripts/install.sh" \
+    || fail 'installer does not request machine-readable QML diagnostics'
+  grep -Fq '.id == "syntax"' "$ROOT/scripts/install.sh" \
+    || fail 'installer still treats warning-blind qmllint rc=0 as semantic validation'
+  grep -Fq 'omarchy-plugin-validate "$root"' "$ROOT/scripts/install.sh" \
+    || fail 'installer does not use the supported Omarchy plugin validator'
+}
+
+test_qml_syntax_error_blocks_install() {
+  [[ -x /usr/lib/qt6/bin/qmllint || $(command -v qmllint 2>/dev/null) ]] || return 0
+  local home="$TEST_ROOT/bad-qml-home"
+  local dest="$home/.config/omarchy/plugins/$PLUGIN_ID"
+  local output="$TEST_ROOT/bad-qml-output"
+  mkdir -p "$(dirname -- "$dest")"
+  cp -a "$ROOT/." "$dest/"
+  printf 'import QtQuick\nItem { broken syntax }\n' >"$dest/Broken.qml"
+
+  if HOME=$home WE_SKIP_MENU_REFRESH=1 \
+      "$dest/scripts/install.sh" >"$output" 2>&1; then
+    fail 'installer accepted a QML parser error'
+  fi
+  grep -Fq 'Expected token' "$output" \
+    || fail 'installer did not report the QML parser diagnostic'
+  [[ -z $(find "$(dirname -- "$dest")" -maxdepth 1 -type d \
+      -name ".${PLUGIN_ID}.stage.*" -print -quit) ]] \
+    || fail 'failed QML validation left a staged plugin tree behind'
+}
+
+if [[ ${WE_LIFECYCLE_TEST_FUNCTIONS_ONLY:-0} == 1 ]]; then
+  return 0
+fi
+
 test_symlinked_cli
 test_additional_wallpaper_folders
 test_qml_text_is_plain
@@ -324,7 +567,7 @@ test_panel_badges_track_display_runtime
 test_display_actions_are_contextual
 test_panel_uses_full_product_name
 test_auto_match_hint_is_concise
-test_save_apply_status_stays_in_button
+test_save_apply_status_is_stable_and_separate
 test_save_controls_stay_outside_settings_scroll
 test_workshop_heading_is_visibly_bold
 test_workshop_catalog_persists_across_display_tabs
@@ -333,5 +576,13 @@ test_uninstall_preserves_data
 test_uninstall_purges_data
 test_uninstall_refuses_unsafe_purge_path
 test_uninstall_validates_all_paths_before_purge
+test_purge_fails_closed_when_controller_fails
+test_hooks_are_current_source_wrappers
+test_canonical_home_paths_ignore_xdg_overrides
+test_menu_editor_handles_multiline_and_items_jsonc
+test_menu_actions_quote_plugin_paths
+test_in_place_install_is_staged_and_generation_stamped
+test_qml_validation_is_explicit_about_syntax
+test_qml_syntax_error_blocks_install
 
 echo 'install lifecycle tests: PASS'
