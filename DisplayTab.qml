@@ -1059,6 +1059,7 @@ Item {
             text: "WORKSHOP WALLPAPERS"
             foreground: root.fg
             fontFamily: root.fontFamily
+            font.weight: Font.Black
           }
 
           Button {
@@ -1223,6 +1224,7 @@ Item {
 
     // ---- Right: settings -----------------------------------------------
     ColumnLayout {
+      id: rightSettingsColumn
       Layout.fillWidth: true
       Layout.fillHeight: true
       Layout.preferredWidth: 1
@@ -1874,84 +1876,78 @@ Item {
             }
           }
 
-          // Actions
-          BorderSurface {
+        }
+      }
+
+      // Fixed right-side footer — a sibling of settingsFlick so it stays
+      // visible while only the settings content scrolls above it.
+      BorderSurface {
+        id: fixedSaveActions
+        Layout.fillWidth: true
+        color: root.sectionFill
+        borderSpec: Border.controlSpec(
+          root.wallpaperSelected ? "selected" : "normal", root.fg, Color.accent)
+        radius: Style.cornerRadius
+        implicitHeight: actionsCol.implicitHeight + Style.space(24)
+
+        ColumnLayout {
+          id: actionsCol
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: parent.top
+          anchors.margins: Style.space(12)
+          spacing: Style.space(8)
+
+          PanelSectionHeader {
+            text: "SAVE SETTINGS"
+            foreground: root.fg
+            fontFamily: root.fontFamily
+          }
+
+          RowLayout {
             Layout.fillWidth: true
-            color: root.sectionFill
-            borderSpec: Border.controlSpec(
-              root.wallpaperSelected ? "selected" : "normal", root.fg, Color.accent)
-            radius: Style.cornerRadius
-            implicitHeight: actionsCol.implicitHeight + Style.space(24)
+            spacing: Style.space(8)
 
-            ColumnLayout {
-              id: actionsCol
-              anchors.left: parent.left
-              anchors.right: parent.right
-              anchors.top: parent.top
-              anchors.margins: Style.space(12)
-              spacing: Style.space(8)
-
-              PanelSectionHeader {
-                text: "SAVE SETTINGS"
-                foreground: root.fg
-                fontFamily: root.fontFamily
-              }
-
-              RowLayout {
-                Layout.fillWidth: true
-                spacing: Style.space(8)
-
-                Button {
-                  id: saveApplyButton
-                  text: root.saveApplyStatus.length
-                    ? root.saveApplyStatus
-                    : "Save & apply"
-                  iconText: "󰐊"
-                  foreground: root.fg
-                  accent: Color.accent
-                  bordered: true
-                  enabled: !root.actionsBlocked && root.displayName.length > 0
-                    && root.wallpaperSelected
-                  Layout.fillWidth: true
-                  onClicked: root.applySettings()
-                }
-
-                Button {
-                  text: "Clear"
-                  iconText: "󰩹"
-                  foreground: root.fg
-                  bordered: true
-                  enabled: !root.actionsBlocked && root.displayName.length > 0 && root.configured
-                  onClicked: root.clearDisplay()
-                }
-              }
-
-              Text {
-                textFormat: Text.PlainText
-                Layout.fillWidth: true
-                visible: !root.busy && !root.wallpaperSelected
-                text: "Select a wallpaper, then Save & apply to update and start this display."
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
-
-              Text {
-                textFormat: Text.PlainText
-                Layout.fillWidth: true
-                visible: root.wallpaperSelected && !root.engineRunning
-                text: "Saves these settings and starts this display only. Other displays remain unchanged."
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
-
+            Button {
+              id: saveApplyButton
+              text: root.saveApplyStatus.length
+                ? root.saveApplyStatus
+                : "Save & apply"
+              iconText: "󰐊"
+              foreground: root.fg
+              accent: Color.accent
+              bordered: true
+              enabled: !root.actionsBlocked && root.displayName.length > 0
+                && root.wallpaperSelected
+              Layout.fillWidth: true
+              onClicked: root.applySettings()
             }
+
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            visible: !root.busy && !root.wallpaperSelected
+            text: "Select a wallpaper, then Save & apply to update and start this display."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            visible: root.wallpaperSelected && !root.engineRunning
+            text: "Saves these settings and starts this display only. Other displays remain unchanged."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
         }
       }
     }
-}
+  }
 }

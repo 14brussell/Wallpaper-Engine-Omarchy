@@ -76,13 +76,9 @@ Item {
     return root.currentMonitor
   }
   readonly property bool applyInFlight: displayBusy || actionProc.running
-  readonly property bool currentHasWallpaper: {
-    if (!currentMonitor.length || !displays || typeof displays !== "object") return false
-    var display = displays[currentMonitor]
-    return !!(display && root.asJsString(display.wallpaper).length)
-  }
+  // Auto-match needs the captured frame recorded by a successful apply.
+  // Merely selecting or saving a wallpaper does not provide a valid source.
   readonly property bool autoThemeHasSource: lastAppliedMonitor.length > 0
-    || currentHasWallpaper
   readonly property string autoThemeHint: {
     var monitor = lastAppliedMonitor.length
       ? lastAppliedMonitor
@@ -519,8 +515,6 @@ Item {
       runWe(["undo-auto-theme"], "Restoring previous theme…")
     else if (lastAppliedMonitor.length)
       runWe(["auto-theme"], "Matching the most recently applied wallpaper…")
-    else if (currentHasWallpaper)
-      runWe(["auto-theme", currentMonitor], "Matching theme colors…")
     else
       statusMessage = "Save & apply a wallpaper before auto-matching its theme"
   }
@@ -940,15 +934,6 @@ Item {
                 fontFamily: root.fontFamily
               }
 
-              Text {
-                textFormat: Text.PlainText
-                visible: root.currentMonitorTitle.length > 0
-                text: "Editing " + root.currentMonitorTitle
-                color: Color.accent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.bold: true
-              }
             }
 
             Text {

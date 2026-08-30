@@ -117,7 +117,7 @@ The lifecycle controls below the selected tab are display-specific:
 The theme controls above the tabs remain global:
 
 - **Revert to theme:** stop them and restore the Omarchy theme background
-- **Auto-match theme:** build and apply an accessible Omarchy palette from the most recently successfully applied wallpaper, regardless of which display tab is selected. Until an apply has been recorded, the selected display is used. The button becomes **Undo theme match** and restores the previously selected theme.
+- **Auto-match theme:** build and apply an accessible Omarchy palette from the most recently successfully applied wallpaper, regardless of which display tab is selected. The control stays disabled until a wallpaper has been successfully applied. The button becomes **Undo theme match** and restores the previously selected theme.
 
 Auto-match writes only to the plugin-owned custom theme at
 `~/.config/omarchy/themes/wallpaper-engine-auto-match`. It refuses to overwrite

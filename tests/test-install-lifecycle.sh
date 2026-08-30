@@ -121,6 +121,8 @@ test_display_actions_are_contextual() {
 test_panel_uses_full_product_name() {
   [[ $(grep -Fc '"Wallpaper Engine for Omarchy"' "$ROOT/Panel.qml") -eq 2 ]] \
     || fail 'panel window and header do not use the full product name'
+  ! grep -Fq 'text: "Editing " + root.currentMonitorTitle' "$ROOT/Panel.qml" \
+    || fail 'Displays header still duplicates the active monitor label'
 }
 
 test_auto_match_hint_is_concise() {
@@ -129,6 +131,11 @@ test_auto_match_hint_is_concise() {
     || fail 'auto-match hint does not use the concise wording'
   grep -Fq 'text: root.autoThemeHint' "$ROOT/Panel.qml" \
     || fail 'auto-match hint still has a redundant label prefix'
+  grep -Fq 'readonly property bool autoThemeHasSource: lastAppliedMonitor.length > 0' \
+    "$ROOT/Panel.qml" \
+    || fail 'auto-match is not gated on a successfully applied wallpaper'
+  ! grep -Fq 'else if (currentHasWallpaper)' "$ROOT/Panel.qml" \
+    || fail 'auto-match still accepts a merely configured wallpaper'
 }
 
 test_save_apply_status_stays_in_button() {
@@ -141,6 +148,28 @@ test_save_apply_status_stays_in_button() {
   ! grep -Fq 'visible: !root.busy && root.wallpaperSelected && !root.engineRunning' \
     "$ROOT/DisplayTab.qml" \
     || fail 'Save & apply still hides guidance and shifts layout while busy'
+}
+
+test_save_controls_stay_outside_settings_scroll() {
+  grep -Fq 'id: rightSettingsColumn' "$ROOT/DisplayTab.qml" \
+    || fail 'settings pane does not own a dedicated right-side layout'
+  ! grep -Fq 'id: settingsWorkspace' "$ROOT/DisplayTab.qml" \
+    || fail 'save footer still spans the full wallpaper/settings workspace'
+  local settings_line flick_line save_line
+  settings_line=$(grep -n -F 'id: rightSettingsColumn' "$ROOT/DisplayTab.qml" | cut -d: -f1)
+  flick_line=$(grep -n -F 'id: settingsFlick' "$ROOT/DisplayTab.qml" | cut -d: -f1)
+  save_line=$(grep -n -F 'id: fixedSaveActions' "$ROOT/DisplayTab.qml" | cut -d: -f1)
+  [[ -n $settings_line && -n $flick_line && -n $save_line \
+      && $flick_line -gt $settings_line && $save_line -gt $flick_line ]] \
+    || fail 'fixed save footer is not below the right-side settings scroller'
+  ! grep -Fq 'text: "Clear"' "$ROOT/DisplayTab.qml" \
+    || fail 'fixed save footer still exposes the redundant Clear action'
+}
+
+test_workshop_heading_is_visibly_bold() {
+  grep -A6 -F 'text: "WORKSHOP WALLPAPERS"' "$ROOT/DisplayTab.qml" \
+    | grep -Fq 'font.weight: Font.Black' \
+    || fail 'Workshop wallpapers heading does not use a visibly bold weight'
 }
 
 test_legacy_preflight() {
@@ -270,6 +299,8 @@ test_display_actions_are_contextual
 test_panel_uses_full_product_name
 test_auto_match_hint_is_concise
 test_save_apply_status_stays_in_button
+test_save_controls_stay_outside_settings_scroll
+test_workshop_heading_is_visibly_bold
 test_legacy_preflight
 test_uninstall_preserves_data
 test_uninstall_purges_data
