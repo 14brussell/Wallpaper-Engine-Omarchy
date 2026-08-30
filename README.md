@@ -41,8 +41,6 @@ omarchy pkg aur add linux-wallpaperengine-git
 
 ## Install
 
-`omarchy plugin add` **never** runs `install.sh`. Run the installer yourself.
-
 ```bash
 omarchy plugin add https://github.com/14brussell/Wallpaper-Engine-Omarchy.git --enable
 ~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/install.sh
