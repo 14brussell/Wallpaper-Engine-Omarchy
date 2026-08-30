@@ -45,15 +45,48 @@ watch_already_running() {
   unit_is_running || watch_pid_live
 }
 
+watch_cmd_is_plugin() {
+  local pid=${1:-} cmd=""
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+  cmd=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)
+  [[ $cmd == *"$HOOK_PATH"* ]]
+}
+
+unit_exec_is_plugin() {
+  local execstart=""
+  command -v systemctl >/dev/null 2>&1 || return 1
+  execstart=$(systemctl --user show -p ExecStart --value "$WE_MONITOR_WATCH_UNIT" 2>/dev/null || true)
+  [[ $execstart == *"$HOOK_PATH"* ]]
+}
+
+stop_foreign_watch() {
+  local pid
+  if unit_is_running && ! unit_exec_is_plugin; then
+    systemctl --user stop "$WE_MONITOR_WATCH_UNIT" 2>/dev/null || true
+  fi
+  if [[ -f $WE_MONITOR_WATCH_PID_FILE ]]; then
+    pid=$(<"$WE_MONITOR_WATCH_PID_FILE")
+    if [[ $pid =~ ^[1-9][0-9]*$ ]] && kill -0 -- "$pid" 2>/dev/null \
+      && ! watch_cmd_is_plugin "$pid"; then
+      kill -- "$pid" 2>/dev/null || true
+      rm -f -- "$WE_MONITOR_WATCH_PID_FILE"
+    fi
+  fi
+}
+
 cmd_ensure() {
   [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || return 0
   we_ensure_dirs
   : >>"$WE_MONITOR_WATCH_LOG"
 
-  # Singleton: never systemd-run (or setsid) a second --loop. A failed
-  # systemd-run while the unit is already starting used to fall through to
-  # setsid and overlap PIDs. Exec stays HOOK_PATH (plugin dir when installed).
-  if watch_already_running; then
+  # Singleton on this plugin's hook path. A leftover workspace or stale unit
+  # with the same name is stopped so ExecStart stays the installed plugin dir.
+  stop_foreign_watch
+
+  if unit_is_running && unit_exec_is_plugin; then
+    return 0
+  fi
+  if watch_pid_live && watch_cmd_is_plugin "$(<"$WE_MONITOR_WATCH_PID_FILE")"; then
     return 0
   fi
 
