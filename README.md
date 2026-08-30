@@ -16,13 +16,14 @@ Display names and resolutions are detected from each user’s Hyprland setup.
 
 ## Highlights
 
-- Quickshell panel with one tab per display
-- Workshop browser with thumbnails, search, and wallpaper properties
+- Redesigned Quickshell panel with one tab per display, live Running/Stopped badges, and contextual Start/Stop controls for each display
+- Streamlined per-display settings with a fixed **Save & apply** action, in-button progress and errors, plus scaling, FPS, clamp, audio, wallpaper properties, and other engine options
+- Workshop browser with thumbnails, wallpaper properties, and a shared catalog and search filter that stay cached while switching display tabs
 - Additional Steam libraries on other disks, managed from the GUI or CLI
-- Per-display wallpapers, scaling, FPS, audio, and other engine settings
-- Safe replacement: a new wallpaper must render before the old one stops
-- Reversible Omarchy color themes generated from the active wallpaper
-- Theme restore, bar widget, CLI, hooks, and an optional gum TUI
+- Seamless per-display replacement that keeps the old wallpaper running until the new one produces a complete rendered frame, rejecting incomplete or blank framebuffer captures
+- Reversible Omarchy color themes generated from the most recently successfully applied wallpaper, with the source remembered across tabs, restarts, and config upgrades
+- Auto-match safeguards that require a live wallpaper and valid captured frame, support one-click undo, and restore the previous theme when the final Wallpaper Engine process stops
+- Theme restore, bar widget, CLI, boot and theme hooks, and an optional gum TUI
 
 ## Requirements
 
