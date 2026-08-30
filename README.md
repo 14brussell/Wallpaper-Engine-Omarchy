@@ -43,14 +43,6 @@ omarchy plugin add https://github.com/14brussell/Wallpaper-Engine-Omarchy.git --
 ~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/install.sh
 ```
 
-`plugin add` clones a git checkout. `install.sh` keeps that `.git`, installs Style menu entries and hook wrappers, links `omarchy-we` / `we-omarchy`, and runs `doctor`. Do **not** run `we install-hooks` as a second setup step.
-
-Local tree: run that tree's `scripts/install.sh`, then `omarchy plugin enable io.github.14brussell.wallpaper-engine`. Re-run the installer after source changes.
-
-If the legacy `wallpaper-engine-omarchy` id is present, the installer prints migration commands and stops. Config is preserved.
-
-Panel missing: `omarchy-shell shell rescanPlugins`
-
 ### Update
 
 ```bash
