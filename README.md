@@ -14,7 +14,7 @@ This plugin is not an AUR package.
 
 **Required** (before `omarchy-we apply`):
 
-- [linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) — AUR. **`install.sh` does not install it.**
+- [linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) — AUR.
 
 ```bash
 omarchy pkg aur add linux-wallpaperengine-git
