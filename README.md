@@ -16,7 +16,7 @@ Display names and resolutions are detected from each user’s Hyprland setup.
 
 ## Highlights
 
-- Redesigned Quickshell panel with one tab per display, live Running/Stopped badges, and contextual Start/Stop controls for each display
+- Quickshell panel with one tab per display, live Running/Stopped badges, and contextual Start/Stop controls for each display
 - Streamlined per-display settings with a fixed **Save & apply** action, in-button progress and errors, plus scaling, FPS, clamp, audio, wallpaper properties, and other engine options
 - Workshop browser with thumbnails, wallpaper properties, and a shared catalog and search filter that stay cached while switching display tabs
 - Additional Steam libraries on other disks, managed from the GUI or CLI
