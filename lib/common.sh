@@ -2639,8 +2639,103 @@ we_monitor_pid_file() {
   printf '%s/%s.pid\n' "$WE_PID_DIR" "$(we_monitor_key "$1")"
 }
 
+# Written as soon as a replacement is spawned, before first-paint. stop/revert
+# glob *.pid so they can reap an apply that was SIGTERM'd mid-wait.
+we_monitor_starting_pid_file() {
+  printf '%s/%s.starting.pid\n' "$WE_PID_DIR" "$(we_monitor_key "$1")"
+}
+
 we_monitor_log_file() {
   printf '%s/engine.%s.log\n' "$WE_STATE_DIR" "$(we_monitor_key "$1")"
+}
+
+# In-flight (spawned, not yet painted) engines owned by this process. TERM/INT
+# of `we apply` must kill these; EXIT must not kill already-committed ones.
+WE_INFLIGHT_ENGINES=()
+WE_ENGINE_LIFECYCLE_TRAPS=0
+
+we_track_inflight_engine() {
+  local pid=$1 start=$2 pending=$3
+  WE_INFLIGHT_ENGINES+=("${pid}|${start}|${pending}")
+}
+
+we_untrack_inflight_engine() {
+  local pid=$1 start=$2 entry prefix
+  local -a kept=()
+  prefix="${pid}|${start}|"
+  for entry in "${WE_INFLIGHT_ENGINES[@]+"${WE_INFLIGHT_ENGINES[@]}"}"; do
+    [[ $entry == "$prefix"* ]] && continue
+    kept+=("$entry")
+  done
+  WE_INFLIGHT_ENGINES=()
+  if ((${#kept[@]})); then
+    WE_INFLIGHT_ENGINES=("${kept[@]}")
+  fi
+  return 0
+}
+
+we_cleanup_inflight_engines() {
+  local entry pid start pending
+  local -a snapshot=()
+  ((${#WE_INFLIGHT_ENGINES[@]})) && snapshot=("${WE_INFLIGHT_ENGINES[@]}")
+  WE_INFLIGHT_ENGINES=()
+  for entry in "${snapshot[@]+"${snapshot[@]}"}"; do
+    IFS='|' read -r pid start pending <<<"$entry"
+    rm -f "$pending"
+    we_terminate_identity "$pid $start"
+    if [[ $pid =~ ^[1-9][0-9]*$ ]] && kill -0 -- "$pid" 2>/dev/null; then
+      kill -KILL -- "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
+we_on_engine_lifecycle_signal() {
+  local rc=${1:-143}
+  trap - TERM INT EXIT
+  we_cleanup_inflight_engines
+  exit "$rc"
+}
+
+we_install_engine_lifecycle_traps() {
+  [[ ${WE_ENGINE_LIFECYCLE_TRAPS:-0} -eq 1 ]] && return 0
+  WE_ENGINE_LIFECYCLE_TRAPS=1
+  trap 'we_on_engine_lifecycle_signal 143' TERM
+  trap 'we_on_engine_lifecycle_signal 130' INT
+  trap 'we_cleanup_inflight_engines' EXIT
+}
+
+# Refresh /proc starttime until it is readable. The first sample can be empty
+# while the kernel is still publishing the new task; returning 1 in that case
+# used to skip the kill and leak the child.
+we_capture_engine_starttime() {
+  local pid=$1 start="" i
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    start=$(we_proc_starttime "$pid" 2>/dev/null || true)
+    if we_is_engine_pid "$pid" && [[ -n $start ]]; then
+      printf '%s\n' "$start"
+      return 0
+    fi
+    kill -0 -- "$pid" 2>/dev/null || return 1
+    sleep 0.05
+  done
+  start=$(we_proc_starttime "$pid" 2>/dev/null || true)
+  if we_is_engine_pid "$pid" && [[ -n $start ]]; then
+    printf '%s\n' "$start"
+    return 0
+  fi
+  return 1
+}
+
+# Always reap $! from a failed spawn, even when starttime never appeared.
+we_kill_unconfirmed_spawn() {
+  local pid=${1:-} start=${2:-}
+  if [[ -n $start ]]; then
+    we_terminate_identity "$pid $start"
+  fi
+  if [[ $pid =~ ^[1-9][0-9]*$ ]] && kill -0 -- "$pid" 2>/dev/null; then
+    kill -KILL -- "$pid" 2>/dev/null || true
+  fi
 }
 
 we_terminate_identity() {
@@ -2657,11 +2752,14 @@ we_terminate_identity() {
 }
 
 we_stop_engine_monitor() {
-  local monitor=$1 file identity
+  local monitor=$1 file starting identity starting_identity
   file=$(we_monitor_pid_file "$monitor")
+  starting=$(we_monitor_starting_pid_file "$monitor")
   identity=$(we_owned_pid_identity "$file" 2>/dev/null || true)
-  rm -f "$file"
+  starting_identity=$(we_owned_pid_identity "$starting" 2>/dev/null || true)
+  rm -f "$file" "$starting"
   we_terminate_identity "$identity"
+  we_terminate_identity "$starting_identity"
 }
 
 we_sync_active_state() {
@@ -2749,8 +2847,8 @@ we_record_last_applied() {
 }
 
 we_start_engine_monitor() {
-  local monitor=$1 wallpaper resolved key wallpaper_key pid_file log_file old_identity
-  local screenshot engine_pid engine_start pid_ready=false pid_tmp i
+  local monitor=$1 wallpaper resolved key wallpaper_key pid_file starting_file log_file old_identity
+  local screenshot engine_pid engine_start pid_tmp
   local project_type particles_disabled painted=true engine_alive=true
   local -a args=() env_prefix=()
 
@@ -2770,6 +2868,7 @@ we_start_engine_monitor() {
   key=$(we_monitor_key "$monitor")
   wallpaper_key=$(we_wallpaper_key "$wallpaper")
   pid_file=$(we_monitor_pid_file "$monitor")
+  starting_file=$(we_monitor_starting_pid_file "$monitor")
   log_file=$(we_monitor_log_file "$monitor")
   old_identity=$(we_owned_pid_identity "$pid_file" 2>/dev/null || true)
   screenshot="$WE_STATE_DIR/lwe-ready.${key}.${wallpaper_key}.$(we_now_ms).jpg"
@@ -2786,32 +2885,28 @@ we_start_engine_monitor() {
     env_prefix=(env __GL_THREADED_OPTIMIZATIONS=0)
   fi
 
+  we_install_engine_lifecycle_traps
+
   # Start the replacement first. Its unique framebuffer is the readiness
   # signal; the prior process keeps the old wallpaper visible until then.
+  # Track the child immediately so TERM of `we` cannot orphan a nohup'd engine.
   nohup "${env_prefix[@]}" "$WE_ENGINE_BIN" "${args[@]}" \
     </dev/null >>"$log_file" 2>&1 9>&- &
   engine_pid=$!
-  engine_start=$(we_proc_starttime "$engine_pid" 2>/dev/null || true)
-  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-    if we_is_engine_pid "$engine_pid"; then
-      pid_ready=true
-      break
-    fi
-    kill -0 -- "$engine_pid" 2>/dev/null || break
-    sleep 0.05
-  done
-  if ! $pid_ready || [[ -z $engine_start ]]; then
-    if [[ -n $engine_start && $(we_proc_starttime "$engine_pid" 2>/dev/null || true) == "$engine_start" ]]; then
-      kill -KILL -- "$engine_pid" 2>/dev/null || true
-    fi
+  if ! engine_start=$(we_capture_engine_starttime "$engine_pid"); then
+    we_kill_unconfirmed_spawn "$engine_pid" "$engine_start"
     echo "Wallpaper Engine could not start on $monitor; see $log_file" >&2
     return 1
   fi
+  we_atomic_line "$starting_file" "$engine_pid $engine_start"
+  we_track_inflight_engine "$engine_pid" "$engine_start" "$starting_file"
 
   we_wait_engine_first_paint \
     "$WE_LWE_READY_MS" "$engine_pid" "$engine_start" "$monitor" "$log_file" || painted=false
   we_is_engine_pid "$engine_pid" "$engine_start" || engine_alive=false
   if ! $painted || ! $engine_alive; then
+    we_untrack_inflight_engine "$engine_pid" "$engine_start"
+    rm -f "$starting_file"
     we_terminate_identity "$engine_pid $engine_start"
 
     # Some older Scene projects trigger an upstream linux-wallpaperengine
@@ -2835,9 +2930,11 @@ we_start_engine_monitor() {
     return 1
   fi
 
+  we_untrack_inflight_engine "$engine_pid" "$engine_start"
   pid_tmp=$(mktemp "$WE_PID_DIR/.${key}.pid.tmp.XXXXXX")
   printf '%s %s\n' "$engine_pid" "$engine_start" >"$pid_tmp"
   mv -f "$pid_tmp" "$pid_file"
+  rm -f "$starting_file"
   we_terminate_identity "$old_identity"
   find "$WE_STATE_DIR" -maxdepth 1 -type f -name "lwe-ready.${key}.*.jpg" \
     ! -path "$screenshot" -delete 2>/dev/null || true
@@ -2848,6 +2945,7 @@ we_start_engine_monitor() {
 
 we_start_engine() {
   we_bg_queue_enter
+  we_install_engine_lifecycle_traps
   we_load_config
   command -v "$WE_ENGINE_BIN" >/dev/null 2>&1 || {
     echo "Missing dependency: $WE_ENGINE_BIN (install linux-wallpaperengine-git from AUR)" >&2
