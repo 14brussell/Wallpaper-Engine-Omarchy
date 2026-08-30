@@ -186,7 +186,10 @@ Item {
     pendingDiscardAction = ""
     if (action === "tab") {
       var current = root.currentDisplayTab()
-      if (current) current.draftDirty = false
+      // Reload saved config and cancel queued / in-flight apply — clearing
+      // draftDirty alone still lets we apply the discarded wallpaper.
+      if (current)
+        current.discardDraftAndReload()
       root.refreshDirtyDisplays()
       var next = pendingTabIndex
       pendingTabIndex = -1
@@ -203,7 +206,8 @@ Item {
     } else if (action === "close") {
       for (var i = 0; i < root.displayCount; i++) {
         var item = tabRepeater.itemAt(i)
-        if (item) item.draftDirty = false
+        if (item && (item.draftDirty || item.applyQueued || item.busy))
+          item.discardDraftAndReload()
       }
       wallpaperDirsDraft = extraWallpaperDirs ? extraWallpaperDirs.slice(0) : []
       folderPathField.text = ""

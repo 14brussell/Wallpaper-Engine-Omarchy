@@ -117,9 +117,9 @@ Item {
   property string capsExpectedId: ""
 
   readonly property bool wallpaperSelected: String(selectedWallpaperId || "").length > 0
-  readonly property bool hasAudio: !!(wallpaperCaps && wallpaperCaps.hasAudio)
-  readonly property bool supportsMouse: !!(wallpaperCaps && wallpaperCaps.supportsMouse)
-  readonly property bool supportsParallax: !!(wallpaperCaps && wallpaperCaps.supportsParallax)
+  readonly property bool hasAudio: root.qmlBool(wallpaperCaps && wallpaperCaps.hasAudio)
+  readonly property bool supportsMouse: root.qmlBool(wallpaperCaps && wallpaperCaps.supportsMouse)
+  readonly property bool supportsParallax: root.qmlBool(wallpaperCaps && wallpaperCaps.supportsParallax)
   readonly property var listedProperties: {
     var caps = wallpaperCaps || ({})
     var list = caps.properties
@@ -236,7 +236,24 @@ Item {
     setSaveApplyFeedback("idle", "")
   }
 
+  function cancelQueuedOrInFlightApply() {
+    applyQueued = false
+    queuedApplyWallpaperId = ""
+    actionWatchdog.stop()
+    startGuard.stop()
+    actionQueue = []
+    actionGen += 1
+    var wasRunning = actionProc.running
+    busy = false
+    actionKind = ""
+    if (wasRunning) {
+      try { actionProc.running = false } catch (e) {}
+    }
+    setSaveApplyFeedback("idle", "")
+  }
+
   function discardDraftAndReload() {
+    cancelQueuedOrInFlightApply()
     draftDirty = false
     reloadConfirmationVisible = false
     reload()
@@ -252,7 +269,10 @@ Item {
     queuedApplyWallpaperId = ""
     if (!queuedId.length || queuedId !== String(selectedWallpaperId || ""))
       return
+    var gen = actionGen
     Qt.callLater(function() {
+      if (gen !== root.actionGen)
+        return
       if (!root.actionsBlocked
           && queuedId === String(root.selectedWallpaperId || ""))
         root.applySettings()
@@ -579,11 +599,43 @@ Item {
     startWeChain([[resolvedWeBin, "set-property", displayName, k, v]], "property", "")
   }
 
+  // QV4/Quickshell often wraps JSON values as V4ReferenceObject; String(obj)
+  // becomes "[object V4ReferenceObject]". Round-trip through JSON to get real
+  // primitives before any UI concatenation.
+  function qmlPlain(value) {
+    if (value === undefined || value === null) return null
+    var t = typeof value
+    if (t === "string" || t === "number" || t === "boolean") return value
+    try {
+      return JSON.parse(JSON.stringify(value))
+    } catch (e) {
+      return null
+    }
+  }
+
+  // JSON false wrapped as V4ReferenceObject is truthy under !!. Never treat
+  // leftover objects as true — silent:false reloaded as muted, configured:false
+  // looked Start-ready, hasAudio:false showed audio chrome.
+  function qmlBool(value) {
+    if (value === true) return true
+    if (value === false || value === undefined || value === null) return false
+    var v = root.qmlPlain(value)
+    if (v === true) return true
+    if (v === false || v === undefined || v === null) return false
+    if (typeof v === "number") return v !== 0
+    if (typeof v === "string") {
+      var s = v.toLowerCase()
+      return s === "true" || s === "1" || s === "running" || s === "yes"
+    }
+    if (Array.isArray(v)) return v.length > 0
+    return false
+  }
+
   function bindEffective(data) {
     if (!data || typeof data !== "object") return
 
-    configured = !!data.configured
-    hasWallpaper = !!data.hasWallpaper
+    configured = root.qmlBool(data.configured)
+    hasWallpaper = root.qmlBool(data.hasWallpaper)
       || !!(data.wallpaper !== undefined && data.wallpaper !== null && String(data.wallpaper).length)
 
     selectedWallpaperId = data.wallpaper !== undefined && data.wallpaper !== null
@@ -592,20 +644,22 @@ Item {
     scaling = String(data.scaling || "fill")
     fps = Number(data.fps) || 30
     clampMode = String(data.clamp || "border")
-    silent = data.silent !== false
+    silent = (data.silent === undefined || data.silent === null)
+      ? true
+      : root.qmlBool(data.silent)
     volume = Number(data.volume)
     if (isNaN(volume)) volume = 15
     engineLayer = String(data.layer || "bottom")
-    noFullscreenPause = !!data.noFullscreenPause
-    fullscreenPauseOnlyActive = !!data.fullscreenPauseOnlyActive
+    noFullscreenPause = root.qmlBool(data.noFullscreenPause)
+    fullscreenPauseOnlyActive = root.qmlBool(data.fullscreenPauseOnlyActive)
     var ignoredApps = data.fullscreenPauseIgnoreAppIds
     fullscreenPauseIgnoreAppIds = (ignoredApps && ignoredApps.join)
       ? ignoredApps.join(", ") : String(ignoredApps || "")
-    noautomute = !!data.noautomute
-    noAudioProcessing = !!data.noAudioProcessing
-    disableParticles = !!data.disableParticles
-    disableMouse = !!data.disableMouse
-    disableParallax = !!data.disableParallax
+    noautomute = root.qmlBool(data.noautomute)
+    noAudioProcessing = root.qmlBool(data.noAudioProcessing)
+    disableParticles = root.qmlBool(data.disableParticles)
+    disableMouse = root.qmlBool(data.disableMouse)
+    disableParallax = root.qmlBool(data.disableParallax)
 
     var props = ({})
     var rawProps = data.properties
@@ -654,17 +708,17 @@ Item {
           scaling: (d.scaling !== undefined && d.scaling !== null && String(d.scaling).length) ? d.scaling : (defs.scaling || "fill"),
           fps: (d.fps !== undefined && d.fps !== null) ? d.fps : (defs.fps || 30),
           clamp: (d.clamp !== undefined && d.clamp !== null && String(d.clamp).length) ? d.clamp : (defs.clamp || "border"),
-          silent: (d.silent !== undefined) ? d.silent : (defs.silent !== false),
+          silent: (d.silent !== undefined && d.silent !== null) ? d.silent : defs.silent,
           volume: (d.volume !== undefined && d.volume !== null) ? d.volume : (defs.volume || 15),
           layer: (d.layer !== undefined && d.layer !== null && String(d.layer).length) ? d.layer : (defs.layer || "bottom"),
-          noFullscreenPause: (d.no_fullscreen_pause !== undefined) ? d.no_fullscreen_pause : !!defs.no_fullscreen_pause,
-          fullscreenPauseOnlyActive: (d.fullscreen_pause_only_active !== undefined) ? d.fullscreen_pause_only_active : !!defs.fullscreen_pause_only_active,
+          noFullscreenPause: (d.no_fullscreen_pause !== undefined && d.no_fullscreen_pause !== null) ? d.no_fullscreen_pause : defs.no_fullscreen_pause,
+          fullscreenPauseOnlyActive: (d.fullscreen_pause_only_active !== undefined && d.fullscreen_pause_only_active !== null) ? d.fullscreen_pause_only_active : defs.fullscreen_pause_only_active,
           fullscreenPauseIgnoreAppIds: (d.fullscreen_pause_ignore_appids !== undefined) ? d.fullscreen_pause_ignore_appids : (defs.fullscreen_pause_ignore_appids || []),
-          noautomute: (d.noautomute !== undefined) ? d.noautomute : !!defs.noautomute,
-          noAudioProcessing: (d.no_audio_processing !== undefined) ? d.no_audio_processing : !!defs.no_audio_processing,
-          disableParticles: (d.disable_particles !== undefined) ? d.disable_particles : !!defs.disable_particles,
-          disableMouse: (d.disable_mouse !== undefined) ? d.disable_mouse : !!defs.disable_mouse,
-          disableParallax: (d.disable_parallax !== undefined) ? d.disable_parallax : !!defs.disable_parallax,
+          noautomute: (d.noautomute !== undefined && d.noautomute !== null) ? d.noautomute : defs.noautomute,
+          noAudioProcessing: (d.no_audio_processing !== undefined && d.no_audio_processing !== null) ? d.no_audio_processing : defs.no_audio_processing,
+          disableParticles: (d.disable_particles !== undefined && d.disable_particles !== null) ? d.disable_particles : defs.disable_particles,
+          disableMouse: (d.disable_mouse !== undefined && d.disable_mouse !== null) ? d.disable_mouse : defs.disable_mouse,
+          disableParallax: (d.disable_parallax !== undefined && d.disable_parallax !== null) ? d.disable_parallax : defs.disable_parallax,
           properties: d.properties || defs.properties || ({})
         })
         return
