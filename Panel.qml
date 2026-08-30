@@ -62,10 +62,6 @@ Item {
     return (typeof n === "number" && isFinite(n) && n > 0) ? Math.floor(n) : 0
   }
 
-  // The header badge reports live engine process state only. Saved display
-  // configuration is surfaced separately and must not masquerade as runtime.
-  readonly property string statusLabel: engineRunning ? "Running" : "Stopped"
-  readonly property color statusColor: engineRunning ? Color.accent : dim
   // Single source of truth for caption + tab highlight + stack + tabActive.
   readonly property string currentMonitor: {
     if (displayCount === 0) return ""
@@ -88,20 +84,11 @@ Item {
   readonly property bool autoThemeHasSource: lastAppliedMonitor.length > 0
     || currentHasWallpaper
   readonly property string autoThemeHint: {
-    if (autoThemeActive) {
-      return autoThemeSourceMonitor.length
-        ? ("Theme colors are matched to the wallpaper applied on "
-          + autoThemeSourceMonitor + ".")
-        : "Theme colors are matched to the previously applied wallpaper."
-    }
-    if (lastAppliedMonitor.length) {
-      return "Uses the most recently applied wallpaper by default ("
-        + lastAppliedMonitor + ")."
-    }
-    if (currentHasWallpaper) {
-      return "Uses the most recently applied wallpaper by default. Until one is recorded, the selected display is used."
-    }
-    return "Uses the most recently applied wallpaper by default. Save & apply a wallpaper first."
+    var monitor = lastAppliedMonitor.length
+      ? lastAppliedMonitor
+      : autoThemeSourceMonitor
+    var hint = "Uses the most recently applied wallpaper"
+    return monitor.length ? (hint + " (" + monitor + ")") : hint
   }
   readonly property bool savingWallpaperDirs: actionProc.running
     && actionProc.actionName === "set-wallpaper-dirs"
@@ -760,7 +747,7 @@ Item {
   FloatingWindow {
     id: window
     visible: root.opened
-    title: "Wallpaper Engine"
+    title: "Wallpaper Engine for Omarchy"
     color: root.bg
     implicitWidth: Style.space(920)
     implicitHeight: Style.space(620)
@@ -817,7 +804,7 @@ Item {
 
                 Text {
                   textFormat: Text.PlainText
-                  text: "Wallpaper Engine"
+                  text: "Wallpaper Engine for Omarchy"
                   color: root.fg
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.title
@@ -839,36 +826,15 @@ Item {
                 textFormat: Text.PlainText
                 Layout.fillWidth: true
                 Layout.maximumWidth: Style.space(420)
-                visible: !root.engineRunning && !root.applyInFlight
-                  && root.statusMessage.length === 0
-                text: root.hasConfiguredDisplays
-                  ? "No display processes are running — use Start inside the display tab you want."
-                  : "No wallpapers configured — pick one on a display tab, then Save & apply."
+                visible: !root.hasConfiguredDisplays && !root.engineRunning
+                  && !root.applyInFlight && root.statusMessage.length === 0
+                text: "No wallpapers configured — pick one on a display tab, then Save & apply."
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 horizontalAlignment: Text.AlignRight
                 verticalAlignment: Text.AlignVCenter
                 wrapMode: Text.WordWrap
-              }
-
-              BorderSurface {
-                implicitWidth: statusText.implicitWidth + Style.space(16)
-                implicitHeight: statusText.implicitHeight + Style.space(8)
-                color: "transparent"
-                borderSpec: Border.controlSpec("normal", root.statusColor, Color.accent)
-                radius: Style.cornerRadius
-
-                Text {
-                  textFormat: Text.PlainText
-                  id: statusText
-                  anchors.centerIn: parent
-                  text: root.statusLabel
-                  color: root.statusColor
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  font.bold: true
-                }
               }
 
               PanelActionButton {
@@ -928,7 +894,7 @@ Item {
               textFormat: Text.PlainText
               Layout.preferredWidth: autoThemeButton.width
               Layout.maximumWidth: autoThemeButton.width
-              text: "Auto-match: " + root.autoThemeHint
+              text: root.autoThemeHint
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1021,6 +987,10 @@ Item {
 
                     readonly property bool selected: index === root.currentTabIndex
                     readonly property bool hovered: tabMouse.containsMouse
+                    readonly property string displayName: root.labelAt(
+                      root.monitorNames, index)
+                    readonly property bool engineRunning: root.displayEngineRunning(
+                      tabDelegate.displayName)
                     readonly property string titleText: {
                       var t = root.labelAt(root.monitorTitles, index)
                       if (t.length) return t
@@ -1059,19 +1029,47 @@ Item {
                     color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.28)
                   }
 
-                  Text {
-                    textFormat: Text.PlainText
-                    id: tabLabel
+                  RowLayout {
                     anchors.centerIn: parent
                     anchors.verticalCenterOffset: tabDelegate.selected ? -1 : 0
-                    text: tabDelegate.titleText
-                    color: tabDelegate.selected ? root.fg : (tabDelegate.hovered ? root.fg : root.dim)
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.title
-                    font.bold: tabDelegate.selected
-                    horizontalAlignment: Text.AlignHCenter
-                    elide: Text.ElideRight
-                    width: parent.width - Style.space(12)
+                    width: parent.width - Style.space(16)
+                    spacing: Style.space(8)
+
+                    Text {
+                      textFormat: Text.PlainText
+                      Layout.fillWidth: true
+                      text: tabDelegate.titleText
+                      color: tabDelegate.selected
+                        ? root.fg
+                        : (tabDelegate.hovered ? root.fg : root.dim)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.title
+                      font.bold: tabDelegate.selected
+                      horizontalAlignment: Text.AlignHCenter
+                      elide: Text.ElideRight
+                    }
+
+                    BorderSurface {
+                      implicitWidth: tabStatusText.implicitWidth + Style.space(16)
+                      implicitHeight: tabStatusText.implicitHeight + Style.space(8)
+                      color: "transparent"
+                      borderSpec: Border.controlSpec(
+                        "normal",
+                        tabDelegate.engineRunning ? Color.accent : root.dim,
+                        Color.accent)
+                      radius: Style.cornerRadius
+
+                      Text {
+                        textFormat: Text.PlainText
+                        id: tabStatusText
+                        anchors.centerIn: parent
+                        text: tabDelegate.engineRunning ? "Running" : "Stopped"
+                        color: tabDelegate.engineRunning ? Color.accent : root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        font.bold: true
+                      }
+                    }
                   }
 
                   Rectangle {

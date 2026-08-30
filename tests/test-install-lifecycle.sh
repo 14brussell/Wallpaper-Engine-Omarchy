@@ -96,10 +96,51 @@ test_qml_text_is_plain() {
   done
 }
 
-test_panel_badge_tracks_runtime_state() {
-  grep -Fq 'readonly property string statusLabel: engineRunning ? "Running" : "Stopped"' \
+test_panel_badges_track_display_runtime() {
+  grep -Fq 'readonly property bool engineRunning: root.displayEngineRunning(' \
     "$ROOT/Panel.qml" \
-    || fail 'panel status badge is not driven by live engine state'
+    || fail 'display-tab status pills are not driven by per-display engine state'
+  grep -Fq 'text: tabDelegate.engineRunning ? "Running" : "Stopped"' \
+    "$ROOT/Panel.qml" \
+    || fail 'display tabs do not expose their running state'
+  ! grep -Fq 'id: statusText' "$ROOT/Panel.qml" \
+    || fail 'panel still exposes a misleading global engine status pill'
+  ! grep -Fq 'No display processes are running' "$ROOT/Panel.qml" \
+    || fail 'panel duplicates the stopped runtime state outside the badge'
+}
+
+test_display_actions_are_contextual() {
+  grep -A12 -F 'id: startButton' "$ROOT/DisplayTab.qml" \
+    | grep -Fq 'visible: !root.engineRunning' \
+    || fail 'display Start action is visible while its engine process is running'
+  grep -A10 -F 'id: stopButton' "$ROOT/DisplayTab.qml" \
+    | grep -Fq 'visible: root.engineRunning' \
+    || fail 'display Stop action is visible while its engine process is stopped'
+}
+
+test_panel_uses_full_product_name() {
+  [[ $(grep -Fc '"Wallpaper Engine for Omarchy"' "$ROOT/Panel.qml") -eq 2 ]] \
+    || fail 'panel window and header do not use the full product name'
+}
+
+test_auto_match_hint_is_concise() {
+  grep -Fq 'var hint = "Uses the most recently applied wallpaper"' \
+    "$ROOT/Panel.qml" \
+    || fail 'auto-match hint does not use the concise wording'
+  grep -Fq 'text: root.autoThemeHint' "$ROOT/Panel.qml" \
+    || fail 'auto-match hint still has a redundant label prefix'
+}
+
+test_save_apply_status_stays_in_button() {
+  grep -A8 -F 'id: saveApplyButton' "$ROOT/DisplayTab.qml" \
+    | grep -Fq 'text: root.saveApplyStatus.length' \
+    || fail 'Save & apply does not expose status through its button label'
+  ! grep -Fq 'visible: root.busy || root.localStatus.length > 0' \
+    "$ROOT/DisplayTab.qml" \
+    || fail 'display action status still adds a layout-shifting row'
+  ! grep -Fq 'visible: !root.busy && root.wallpaperSelected && !root.engineRunning' \
+    "$ROOT/DisplayTab.qml" \
+    || fail 'Save & apply still hides guidance and shifts layout while busy'
 }
 
 test_legacy_preflight() {
@@ -224,7 +265,11 @@ test_uninstall_validates_all_paths_before_purge() {
 test_symlinked_cli
 test_additional_wallpaper_folders
 test_qml_text_is_plain
-test_panel_badge_tracks_runtime_state
+test_panel_badges_track_display_runtime
+test_display_actions_are_contextual
+test_panel_uses_full_product_name
+test_auto_match_hint_is_concise
+test_save_apply_status_stays_in_button
 test_legacy_preflight
 test_uninstall_preserves_data
 test_uninstall_purges_data

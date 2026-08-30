@@ -53,6 +53,7 @@ Item {
   property bool busy: false
   onBusyChanged: root.actionBusyChanged(busy, actionKind)
   property string localStatus: ""
+  property string saveApplyStatus: ""
   property bool configured: false
   property bool hasWallpaper: false
   property string actionKind: ""
@@ -211,6 +212,7 @@ Item {
   function markDraftEdited() {
     draftRevision += 1
     draftDirty = true
+    saveApplyStatus = ""
   }
 
   function continueQueuedApply() {
@@ -232,6 +234,7 @@ Item {
 
   function reload() {
     if (!displayName || !displayName.length) return
+    saveApplyStatus = ""
     setStatus("")
     loadDisplayConfig()
     loadWallpapers()
@@ -411,6 +414,8 @@ Item {
   function failAction(msg) {
     if (!busy && !actionKind.length)
       return
+    var failedKind = actionKind
+    var failure = msg || "we failed"
     actionWatchdog.stop()
     startGuard.stop()
     actionQueue = []
@@ -420,7 +425,9 @@ Item {
     actionKind = ""
     if (wasRunning)
       actionProc.running = false
-    setError(msg || "we failed")
+    if (failedKind === "apply")
+      saveApplyStatus = failure
+    setError(failure)
   }
 
   // Argv Process only — no bash -lc. Login-shell Process has crashed omarchy-shell
@@ -471,10 +478,12 @@ Item {
     // focus so editable SpinBoxes commit their current text before argv is read.
     root.forceActiveFocus(Qt.MouseFocusReason)
     if (!displayName || !displayName.length) {
+      saveApplyStatus = "No display selected"
       setError("No display selected")
       return
     }
     if (!selectedWallpaperId || !String(selectedWallpaperId).length) {
+      saveApplyStatus = "Select a wallpaper first"
       setError("Select a wallpaper first")
       return
     }
@@ -483,12 +492,14 @@ Item {
     if (capsLoading || configReadCurrent) {
       applyQueued = true
       queuedApplyWallpaperId = String(selectedWallpaperId)
+      saveApplyStatus = "Save & apply queued…"
       setStatus(capsLoading
         ? "Loading wallpaper properties — Save & apply queued"
         : "Loading display settings — Save & apply queued")
       return
     }
     actionDraftRevision = draftRevision
+    saveApplyStatus = "Applying…"
     startWeChain(
       [buildSetDisplayArgv(), [resolvedWeBin, "apply", displayName]],
       "apply",
@@ -822,10 +833,13 @@ Item {
             if ((kind === "apply" || kind === "clear")
                 && root.actionDraftRevision === root.draftRevision)
               root.draftDirty = false
-            if (kind === "apply")
-              root.setStatus(root.engineRunning
+            if (kind === "apply") {
+              var appliedMessage = root.engineRunning
                 ? ("Applied to " + root.displayName)
-                : ("Applied & started on " + root.displayName))
+                : ("Applied & started on " + root.displayName)
+              root.saveApplyStatus = appliedMessage
+              root.setStatus(appliedMessage)
+            }
             else if (kind === "clear")
               root.setStatus("Cleared " + root.displayName)
             else if (kind === "start")
@@ -840,19 +854,27 @@ Item {
             root.loadDisplayConfig()
           } else {
             var first = err.length ? err.split("\n")[0] : ""
+            var failureMessage = "we failed"
             if (/Missing dependency:.*linux-wallpaperengine/i.test(first)
                 || /linux-wallpaperengine-git/i.test(err)) {
-              root.setError(first + " — run: we doctor")
+              failureMessage = first + " — run: we doctor"
             } else if (kind === "apply") {
-              root.setError(first.length ? first : "Apply failed — check we doctor / engine.log")
+              failureMessage = first.length
+                ? first
+                : "Apply failed — check we doctor / engine.log"
             } else if (kind === "start") {
-              root.setError(first.length ? first : "Start failed — check we doctor / engine.log")
+              failureMessage = first.length
+                ? first
+                : "Start failed — check we doctor / engine.log"
             } else if (first.length) {
-              root.setError(first)
+              failureMessage = first
             } else {
-              root.setError(kind === "clear" ? "Clear failed"
-                : (kind === "stop" ? "Stop failed" : "we failed"))
+              failureMessage = kind === "clear" ? "Clear failed"
+                : (kind === "stop" ? "Stop failed" : "we failed")
             }
+            if (kind === "apply")
+              root.saveApplyStatus = failureMessage
+            root.setError(failureMessage)
           }
         })
       })
@@ -954,8 +976,8 @@ Item {
 
           Text {
             textFormat: Text.PlainText
-            text: root.displayName + " · " + (root.engineRunning ? "Running" : "Stopped")
-            color: root.engineRunning ? Color.accent : root.fg
+            text: root.displayName
+            color: root.fg
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
             font.bold: true
@@ -977,6 +999,7 @@ Item {
         }
 
         Button {
+          id: startButton
           text: "Start"
           iconText: "󰐊"
           tooltipText: "Start the saved wallpaper on " + root.displayName
@@ -984,17 +1007,20 @@ Item {
           accent: Color.accent
           active: !root.engineRunning && root.configured
           bordered: true
+          visible: !root.engineRunning
           enabled: !root.actionsBlocked && root.displayName.length > 0
             && root.configured && root.hasWallpaper && !root.engineRunning
           onClicked: root.startDisplay()
         }
 
         Button {
+          id: stopButton
           text: "Stop"
           iconText: "󰓛"
           tooltipText: "Stop Wallpaper Engine on " + root.displayName
           foreground: root.fg
           bordered: true
+          visible: root.engineRunning
           enabled: !root.actionsBlocked && root.displayName.length > 0
             && root.engineRunning
           onClicked: root.stopDisplay()
@@ -1876,7 +1902,10 @@ Item {
                 spacing: Style.space(8)
 
                 Button {
-                  text: "Save & apply"
+                  id: saveApplyButton
+                  text: root.saveApplyStatus.length
+                    ? root.saveApplyStatus
+                    : "Save & apply"
                   iconText: "󰐊"
                   foreground: root.fg
                   accent: Color.accent
@@ -1911,7 +1940,7 @@ Item {
               Text {
                 textFormat: Text.PlainText
                 Layout.fillWidth: true
-                visible: !root.busy && root.wallpaperSelected && !root.engineRunning
+                visible: root.wallpaperSelected && !root.engineRunning
                 text: "Saves these settings and starts this display only. Other displays remain unchanged."
                 color: root.dim
                 font.family: root.fontFamily
@@ -1919,23 +1948,6 @@ Item {
                 wrapMode: Text.WordWrap
               }
 
-              Text {
-                textFormat: Text.PlainText
-                Layout.fillWidth: true
-                visible: root.busy || root.localStatus.length > 0
-                text: {
-                  if (!root.busy) return root.localStatus
-                  if (root.actionKind === "start") return "Starting…"
-                  if (root.actionKind === "stop") return "Stopping…"
-                  if (root.actionKind === "clear") return "Clearing…"
-                  if (root.actionKind === "property") return "Saving…"
-                  return "Applying…"
-                }
-                color: root.busy ? Color.accent : root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideRight
-              }
             }
           }
         }
