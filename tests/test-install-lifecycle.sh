@@ -501,6 +501,7 @@ test_in_place_install_is_staged_and_generation_stamped() {
   local remote="$home/plugin-origin.git"
   local update_clone="$home/update-clone"
   local initial_head first_generation updated_head
+  local output="$home/install-output"
   mkdir -p "$(dirname -- "$dest")" "$stub_bin"
   cp -a "$ROOT/." "$dest/"
   rm -rf -- "$dest/.git"
@@ -532,7 +533,11 @@ test_in_place_install_is_staged_and_generation_stamped() {
     XDG_CONFIG_HOME="$TEST_ROOT/in-place-wrong-config" \
     XDG_STATE_HOME="$TEST_ROOT/in-place-wrong-state" \
     WE_SKIP_MENU_REFRESH=1 \
-    "$dest/scripts/install.sh" >/dev/null
+    "$dest/scripts/install.sh" >"$output" 2>&1
+  grep -Fq "omarchy plugin update $PLUGIN_ID" "$output" \
+    || fail 'git checkout install did not print the plugin update path'
+  ! grep -Fq 'omarchy plugin update will not work' "$output" \
+    || fail 'git checkout install printed the copy-install reinstall recipe'
 
   grep -Eq '^[0-9]+-[0-9]+-[0-9]+$' "$dest/.we-build-generation" \
     || fail 'canonical in-place install did not create a concrete generation'
@@ -600,6 +605,63 @@ test_in_place_install_is_staged_and_generation_stamped() {
     || fail 'health rollback dirtied the managed checkout'
 }
 
+test_copy_install_prints_reinstall_recipe() {
+  local home="$TEST_ROOT/copy-install-home"
+  local dest="$home/.config/omarchy/plugins/$PLUGIN_ID"
+  local output="$TEST_ROOT/copy-install-output"
+  mkdir -p "$home"
+
+  HOME=$home WE_SKIP_MENU_REFRESH=1 \
+    "$ROOT/scripts/install.sh" >"$output" 2>&1
+
+  assert_exists "$dest/scripts/install.sh"
+  [[ ! -e $dest/.git ]] \
+    || fail 'copy install left a .git directory at dest'
+  grep -Fq 'omarchy plugin update will not work' "$output" \
+    || fail 'copy install did not say omarchy plugin update will not work'
+  grep -Fq "omarchy plugin remove $PLUGIN_ID" "$output" \
+    || fail 'copy install did not print omarchy plugin remove'
+  grep -Fq "omarchy plugin add https://github.com/14brussell/Wallpaper-Engine-Omarchy.git --enable" \
+    "$output" \
+    || fail 'copy install did not print omarchy plugin add'
+  grep -Fq "$dest/scripts/install.sh" "$output" \
+    || fail 'copy install did not print the installer path'
+  grep -Fq 'Omarchy does not run plugin installers' "$output" \
+    || fail 'copy install did not say Omarchy never runs install.sh'
+  grep -Fq '~/.config/omarchy/wallpaper-engine/' "$output" \
+    || fail 'copy install did not say wallpaper-engine config is preserved'
+  grep -Fq 'Do not use uninstall.sh --purge' "$output" \
+    || fail 'copy install did not warn against a factory wipe'
+  ! grep -Eq '^[[:space:]]+.*uninstall\.sh --purge' "$output" \
+    || fail 'copy install must not prescribe uninstall.sh --purge as a command'
+}
+
+test_readme_update_leads_with_reinstall() {
+  local update_section remove_line update_line
+  update_section=$(awk '/^### Update$/,/^## Remove$/' "$ROOT/README.md")
+  printf '%s\n' "$update_section" | grep -Fq 'one-time reinstall' \
+    || fail 'README Update does not say this is a one-time reinstall'
+  printf '%s\n' "$update_section" | grep -Fq '~/.config/omarchy/wallpaper-engine/' \
+    || fail 'README Update does not say wallpaper-engine config is preserved'
+  printf '%s\n' "$update_section" | grep -Fq 'git merge --ff-only' \
+    || fail 'README Update does not require a fast-forward merge onto main'
+  printf '%s\n' "$update_section" | grep -Fq \
+    'omarchy plugin add https://github.com/14brussell/Wallpaper-Engine-Omarchy.git --enable' \
+    || fail 'README Update is missing the plugin add command'
+  printf '%s\n' "$update_section" | grep -Fq 'never invoke' \
+    || fail 'README Update does not say platform add/update never runs install.sh'
+  remove_line=$(printf '%s\n' "$update_section" \
+    | grep -n -m1 'omarchy plugin remove io.github.14brussell.wallpaper-engine' \
+    | cut -d: -f1)
+  update_line=$(printf '%s\n' "$update_section" \
+    | grep -n -m1 'omarchy plugin update io.github.14brussell.wallpaper-engine' \
+    | cut -d: -f1)
+  [[ -n $remove_line && -n $update_line && $remove_line -lt $update_line ]] \
+    || fail 'README Update must lead with plugin remove, not plugin update'
+  ! printf '%s\n' "$update_section" | awk '/^```/,/^```$/' | grep -Fq -- '--purge' \
+    || fail 'README Update recipe must not use uninstall.sh --purge'
+}
+
 test_qml_validation_is_explicit_about_syntax() {
   grep -Fq -- '--json "$lint_json"' "$ROOT/scripts/install.sh" \
     || fail 'installer does not request machine-readable QML diagnostics'
@@ -655,6 +717,8 @@ test_canonical_home_paths_ignore_xdg_overrides
 test_menu_editor_handles_multiline_and_items_jsonc
 test_menu_actions_quote_plugin_paths
 test_in_place_install_is_staged_and_generation_stamped
+test_copy_install_prints_reinstall_recipe
+test_readme_update_leads_with_reinstall
 test_qml_validation_is_explicit_about_syntax
 test_qml_syntax_error_blocks_install
 

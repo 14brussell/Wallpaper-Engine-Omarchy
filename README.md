@@ -69,9 +69,25 @@ paths even when generic XDG directory variables point elsewhere.
 
 ### Update
 
-After an Omarchy-managed plugin update, rerun the plugin installer so the
-updated checkout is validated, integrations are reconciled, and the shell is
-restarted with the verified generation:
+Omarchy does not run plugin installers. `omarchy plugin add` and
+`omarchy plugin update` never invoke `install.sh`; that command is always a
+separate, required step.
+
+Typical README installs (and current beta installs) are a **copy** of the
+plugin with no `.git` directory. `omarchy plugin update` cannot refresh those.
+This is a **one-time reinstall**. Configuration in
+`~/.config/omarchy/wallpaper-engine/` is preserved. Do not run
+`uninstall.sh --purge` unless you want a factory wipe.
+
+```bash
+omarchy plugin remove io.github.14brussell.wallpaper-engine
+omarchy plugin add https://github.com/14brussell/Wallpaper-Engine-Omarchy.git --enable
+~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/install.sh
+```
+
+If the plugin directory is already a git checkout
+(`~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/.git`), later
+updates are:
 
 ```bash
 omarchy plugin update io.github.14brussell.wallpaper-engine
@@ -82,17 +98,10 @@ Installed hooks are small wrappers around the current plugin sources, so hook
 fixes take effect with the updated checkout rather than leaving copied older
 logic behind.
 
-If an affected prerelease installer already removed the checkout's `.git`
-metadata and `omarchy plugin update` reports that the plugin is not a git
-checkout, reinstall it once. The normal uninstaller preserves wallpaper
-configuration and runtime state:
-
-```bash
-~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/uninstall.sh
-omarchy plugin remove io.github.14brussell.wallpaper-engine
-omarchy plugin add https://github.com/14brussell/Wallpaper-Engine-Omarchy.git --enable
-~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/install.sh
-```
+When landing this branch on `main`, use a fast-forward only
+(`git checkout main && git merge --ff-only beta && git push`). Do not squash
+or create a merge commit; `omarchy plugin update` cannot fast-forward a
+rewritten history.
 
 If the installer finds the legacy `wallpaper-engine-omarchy` plugin ID, it stops
 before making changes and prints the exact migration commands. Remove the legacy

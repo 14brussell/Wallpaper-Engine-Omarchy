@@ -260,6 +260,31 @@ sync_plugin_tree() {
   fi
 }
 
+dest_is_git_checkout() {
+  local dest=$1 git_top dest_phys
+  [[ -e $dest/.git ]] || return 1
+  git_top=$(git -C "$dest" rev-parse --show-toplevel 2>/dev/null) || return 1
+  dest_phys=$(cd "$dest" && pwd -P)
+  git_top=$(cd "$git_top" && pwd -P)
+  [[ $git_top == "$dest_phys" ]]
+}
+
+note_copy_install_cannot_plugin_update() {
+  cat <<EOF
+
+This plugin directory is not a git checkout, so omarchy plugin update will not work.
+Current beta (copy) installs need a one-time reinstall. Configuration in
+~/.config/omarchy/wallpaper-engine/ is preserved. Do not use uninstall.sh --purge
+unless you want a factory wipe.
+
+  omarchy plugin remove $PLUGIN_ID
+  omarchy plugin add https://github.com/14brussell/Wallpaper-Engine-Omarchy.git --enable
+  $DEST/scripts/install.sh
+
+Omarchy does not run plugin installers. Always run install.sh after add or update.
+EOF
+}
+
 # Refuse to swap code while an apply/revert transaction owns the same plugin.
 refuse_legacy_install
 mkdir -p "$(dirname -- "$DEST")" "$HOME/.local/state/omarchy/wallpaper-engine"
@@ -289,7 +314,14 @@ echo "  TUI:    Style → Wallpaper Engine (advanced TUI)  — optional gum fall
 echo "  CLI:    omarchy-we apply | revert | doctor"
 echo "  Config: ~/.config/omarchy/wallpaper-engine/config.json"
 echo
-echo "After editing the source tree, re-run this script to copy into the plugin dir."
+echo "Omarchy does not run this installer on plugin add or update."
+if dest_is_git_checkout "$ROOT"; then
+  echo "Later updates: omarchy plugin update $PLUGIN_ID"
+  echo "  then re-run this installer:"
+  echo "  $ROOT/scripts/install.sh"
+else
+  note_copy_install_cannot_plugin_update
+fi
 echo "Enable the plugin / bar widget (if not already):"
 echo "  omarchy plugin enable $PLUGIN_ID"
 echo
