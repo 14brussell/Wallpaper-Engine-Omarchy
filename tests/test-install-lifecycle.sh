@@ -498,33 +498,106 @@ test_in_place_install_is_staged_and_generation_stamped() {
   local dest="$home/.config/omarchy/plugins/$PLUGIN_ID"
   local stub_bin="$home/stubs"
   local restart_log="$home/restart.log"
+  local remote="$home/plugin-origin.git"
+  local update_clone="$home/update-clone"
+  local initial_head first_generation updated_head
   mkdir -p "$(dirname -- "$dest")" "$stub_bin"
   cp -a "$ROOT/." "$dest/"
+  rm -rf -- "$dest/.git"
+  git -C "$dest" init -q
+  git -C "$dest" config user.name 'Lifecycle Test'
+  git -C "$dest" config user.email 'lifecycle@example.invalid'
+  git -C "$dest" config wallpaper-engine.lifecycle-marker preserved
+  git -C "$dest" add .
+  git -C "$dest" commit -qm 'Create managed plugin fixture'
+  git -C "$dest" branch -M main
+  git init --bare -q "$remote"
+  git -C "$remote" symbolic-ref HEAD refs/heads/main
+  git -C "$dest" remote add origin "$remote"
+  git -C "$dest" push -qu origin main
+  initial_head=$(git -C "$dest" rev-parse HEAD)
   mkdir -p "$home/.config/omarchy"
   printf '{"widgets":[{"id":"%s"}]}\n' "$PLUGIN_ID" \
     >"$home/.config/omarchy/shell.json"
   printf '#!/usr/bin/env bash\nprintf restart >"$WE_TEST_RESTART_LOG"\n' \
     >"$stub_bin/omarchy-restart-shell"
-  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "${1#wallpaper-engine-generation-}"\n' \
+  printf '#!/usr/bin/env bash\n[[ ${1:-} == wallpaper-engine-generation && ${2:-} == ping ]] || exit 2\nprintf "%%s\\n" "$(<"$WE_TEST_GENERATION_FILE")"\n' \
     >"$stub_bin/omarchy-shell"
   chmod +x "$stub_bin/omarchy-restart-shell" "$stub_bin/omarchy-shell"
 
   HOME=$home \
     PATH="$stub_bin:$PATH" \
     WE_TEST_RESTART_LOG=$restart_log \
+    WE_TEST_GENERATION_FILE="$dest/.we-build-generation" \
     XDG_CONFIG_HOME="$TEST_ROOT/in-place-wrong-config" \
     XDG_STATE_HOME="$TEST_ROOT/in-place-wrong-state" \
     WE_SKIP_MENU_REFRESH=1 \
     "$dest/scripts/install.sh" >/dev/null
 
-  ! grep -Fq '__WE_BUILD_GENERATION__' "$dest/Service.qml" \
-    || fail 'canonical in-place install skipped generation stamping'
-  grep -Eq 'readonly property string buildGeneration: "[0-9]+-' "$dest/Service.qml" \
+  grep -Eq '^[0-9]+-[0-9]+-[0-9]+$' "$dest/.we-build-generation" \
     || fail 'canonical in-place install did not create a concrete generation'
+  first_generation=$(<"$dest/.we-build-generation")
+  [[ -d $dest/.git ]] \
+    || fail 'canonical in-place install removed git metadata'
+  [[ $(git -C "$dest" rev-parse --is-inside-work-tree) == true ]] \
+    || fail 'canonical in-place install left an unusable git worktree'
+  [[ $(git -C "$dest" rev-parse --show-toplevel) == "$dest" ]] \
+    || fail 'canonical in-place install detached git from the plugin root'
+  [[ $(git -C "$dest" rev-parse HEAD) == "$initial_head" ]] \
+    || fail 'canonical in-place install changed the managed checkout revision'
+  [[ $(git -C "$dest" config wallpaper-engine.lifecycle-marker) == preserved ]] \
+    || fail 'canonical in-place install replaced repository configuration'
+  [[ -z $(git -C "$dest" status --porcelain --untracked-files=all) ]] \
+    || fail 'canonical in-place install dirtied the managed checkout'
   assert_exists "$restart_log"
   assert_exists "$home/.local/state/omarchy/wallpaper-engine/transition.lock"
   assert_absent "$TEST_ROOT/in-place-wrong-config/omarchy"
   assert_absent "$TEST_ROOT/in-place-wrong-state/omarchy"
+
+  # Exercise the operation used by `omarchy plugin update`: a clean
+  # fast-forward that changes Service.qml, followed by another in-place install.
+  git clone -q -b main "$remote" "$update_clone"
+  git -C "$update_clone" config user.name 'Lifecycle Test Updater'
+  git -C "$update_clone" config user.email 'updater@example.invalid'
+  printf '\n// lifecycle fast-forward fixture\n' >>"$update_clone/Service.qml"
+  git -C "$update_clone" add Service.qml
+  git -C "$update_clone" commit -qm 'Update service fixture'
+  git -C "$update_clone" push -q origin main
+  updated_head=$(git -C "$update_clone" rev-parse HEAD)
+  git -C "$dest" fetch -q origin HEAD
+  git -C "$dest" merge --ff-only -q FETCH_HEAD
+  [[ $(git -C "$dest" rev-parse HEAD) == "$updated_head" ]] \
+    || fail 'managed checkout could not fast-forward after installation'
+
+  HOME=$home \
+    PATH="$stub_bin:$PATH" \
+    WE_TEST_RESTART_LOG=$restart_log \
+    WE_TEST_GENERATION_FILE="$dest/.we-build-generation" \
+    WE_SKIP_MENU_REFRESH=1 \
+    "$dest/scripts/install.sh" >/dev/null
+  [[ $(<"$dest/.we-build-generation") != "$first_generation" ]] \
+    || fail 'repeated in-place install reused the previous generation'
+  grep -Fq '// lifecycle fast-forward fixture' "$dest/Service.qml" \
+    || fail 'repeated in-place install lost the fast-forwarded service update'
+  [[ -z $(git -C "$dest" status --porcelain --untracked-files=all) ]] \
+    || fail 'repeated in-place install dirtied the managed checkout'
+
+  first_generation=$(<"$dest/.we-build-generation")
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$stub_bin/omarchy-restart-shell"
+  if HOME=$home \
+      PATH="$stub_bin:$PATH" \
+      WE_TEST_RESTART_LOG=$restart_log \
+      WE_TEST_GENERATION_FILE="$dest/.we-build-generation" \
+      WE_SKIP_MENU_REFRESH=1 \
+      "$dest/scripts/install.sh" >/dev/null 2>&1; then
+    fail 'in-place install did not fail when shell restart failed'
+  fi
+  [[ -d $dest/.git && $(git -C "$dest" rev-parse HEAD) == "$updated_head" ]] \
+    || fail 'health rollback did not preserve the managed git checkout'
+  [[ $(<"$dest/.we-build-generation") == "$first_generation" ]] \
+    || fail 'health rollback did not restore the previous generation'
+  [[ -z $(git -C "$dest" status --porcelain --untracked-files=all) ]] \
+    || fail 'health rollback dirtied the managed checkout'
 }
 
 test_qml_validation_is_explicit_about_syntax() {

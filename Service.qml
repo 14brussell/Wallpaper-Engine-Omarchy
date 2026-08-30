@@ -11,11 +11,23 @@ Item {
   property var shell: null
   property var manifest: null
 
-  // Replaced in the hidden staging directory by scripts/install.sh.
-  readonly property string buildGeneration: "__WE_BUILD_GENERATION__"
+  // Written as ignored installation state by scripts/install.sh. Keeping the
+  // generation outside tracked QML lets Omarchy retain a clean, updateable git
+  // checkout while the installer can still verify the exact loaded build.
+  property string buildGeneration: ""
+
+  FileView {
+    id: generationFile
+    path: root.manifest && root.manifest.__sourceDir
+      ? String(root.manifest.__sourceDir) + "/.we-build-generation"
+      : ""
+    printErrors: false
+    onLoaded: root.buildGeneration = text().trim()
+    onLoadFailed: function(error) { root.buildGeneration = "" }
+  }
 
   IpcHandler {
-    target: "wallpaper-engine-generation-" + root.buildGeneration
+    target: "wallpaper-engine-generation"
     function ping(): string { return root.buildGeneration }
   }
 }

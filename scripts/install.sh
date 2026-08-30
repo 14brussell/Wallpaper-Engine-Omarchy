@@ -119,20 +119,34 @@ validate_stage() {
 }
 
 # Copy into the lowercase plugin-id path as a real directory (never a symlink
-# to a differently-cased source tree). If we are already running from that
-# directory, skip the copy.
+# to a differently-cased source tree). Canonical git-managed installs retain
+# their repository metadata across the validated atomic replacement.
 sync_plugin_tree() {
   local src=$1 dest=$2
   local parent stage generation replaced=0 committed=0 require_health=0 shell_config
+  local preserve_git=0 git_top dest_phys
   parent=$(dirname -- "$dest")
   mkdir -p "$parent"
+
+  # `omarchy plugin add` creates the canonical destination as a git checkout,
+  # and `omarchy plugin update` requires that checkout's .git directory.  An
+  # in-place install still needs the staged validation and health-checked swap
+  # below, but its repository metadata must travel with the replacement tree.
+  # Only do this for a valid repository rooted at the exact source/destination;
+  # external development copies must never donate their git metadata.
+  if [[ ! -L $dest && -d $dest && $src -ef $dest && -d $dest/.git ]] \
+    && git_top=$(git -C "$dest" rev-parse --show-toplevel 2>/dev/null); then
+    dest_phys=$(cd "$dest" && pwd -P)
+    git_top=$(cd "$git_top" && pwd -P)
+    [[ $git_top == "$dest_phys" ]] && preserve_git=1
+  fi
 
   # Hidden siblings are ignored by Omarchy's recursive plugin watcher. Build
   # and validate the complete replacement there, then expose one atomic move.
   stage=$(mktemp -d "$parent/.${PLUGIN_ID}.stage.XXXXXX")
   copy_tree "$src" "$stage"
   generation="$(date +%s%N)-$$-$RANDOM"
-  sed -i "s/__WE_BUILD_GENERATION__/$generation/g" "$stage/Service.qml"
+  printf '%s\n' "$generation" >"$stage/.we-build-generation"
   set_tree_modes "$stage"
   if ! validate_stage "$stage"; then
     rm -rf -- "$stage"
@@ -157,6 +171,14 @@ sync_plugin_tree() {
     # exchange the trees a second time.
     committed=0
     if (( replaced )); then
+      # After a successful forward swap, the original .git directory is moved
+      # from the old tree into the replacement. Put it back before exchanging
+      # the trees during rollback. Checking its actual location also covers a
+      # signal arriving between mv(1) and the following shell statement.
+      if (( preserve_git )) \
+        && [[ -d $dest/.git ]] && [[ ! -e $stage/.git && ! -L $stage/.git ]]; then
+        mv -- "$dest/.git" "$stage/.git" || return 1
+      fi
       if mv --exchange --no-copy --no-target-directory "$stage" "$dest"; then
         restored=1
       fi
@@ -191,6 +213,13 @@ sync_plugin_tree() {
   fi
   committed=1
 
+  if (( preserve_git )); then
+    # The exchanged-out tree still owns the repository metadata. Attach it to
+    # the validated replacement before removing that old tree after health
+    # verification, so Omarchy continues to recognize this as updateable.
+    mv -- "$stage/.git" "$dest/.git"
+  fi
+
   # The visible move causes one debounced automatic reload. Never overlap it
   # with an explicit rescan. Omarchy's in-process plugin reload can retain old
   # IPC handlers and invalid QML contexts, so an enabled plugin gets one clean,
@@ -207,7 +236,7 @@ sync_plugin_tree() {
     local healthy=0 actual deadline=$((SECONDS + 10))
     while (( SECONDS < deadline )); do
       actual=$(timeout -k 0.2 0.8 \
-        omarchy-shell "wallpaper-engine-generation-${generation}" ping 2>/dev/null || true)
+        omarchy-shell wallpaper-engine-generation ping 2>/dev/null || true)
       if [[ $actual == "$generation" ]]; then
         healthy=1
         break

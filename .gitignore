@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.log
+.we-build-generation
 
 # Local editor and environment state
 .idea/

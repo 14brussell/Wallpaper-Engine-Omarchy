@@ -1,7 +1,7 @@
 # Wallpaper Engine for Omarchy
 
 <p align="center">
-  <img src="beta-preview-699ba2f.png" alt="Wallpaper Engine for Omarchy interface" width="100%">
+  <img src="preview.png" alt="Wallpaper Engine for Omarchy interface" width="100%">
 </p>
 
 Omarchy shell plugin that plays [Steam Wallpaper Engine](https://store.steampowered.com/app/431960/) scenes on Hyprland through [Almamu/linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine).
@@ -81,6 +81,18 @@ omarchy plugin update io.github.14brussell.wallpaper-engine
 Installed hooks are small wrappers around the current plugin sources, so hook
 fixes take effect with the updated checkout rather than leaving copied older
 logic behind.
+
+If an affected prerelease installer already removed the checkout's `.git`
+metadata and `omarchy plugin update` reports that the plugin is not a git
+checkout, reinstall it once. The normal uninstaller preserves wallpaper
+configuration and runtime state:
+
+```bash
+~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/uninstall.sh
+omarchy plugin remove io.github.14brussell.wallpaper-engine
+omarchy plugin add https://github.com/14brussell/Wallpaper-Engine-Omarchy.git --enable
+~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/install.sh
+```
 
 If the installer finds the legacy `wallpaper-engine-omarchy` plugin ID, it stops
 before making changes and prints the exact migration commands. Remove the legacy
