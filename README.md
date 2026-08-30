@@ -10,10 +10,6 @@ https://github.com/user-attachments/assets/8a745361-9db8-40a0-b371-2725e26a6d5e
 
 ## Requirements
 
-**Platform:** Omarchy with Hyprland and Quickshell.
-
-**Hard (needed before `omarchy-we apply`):**
-
 - [linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) — AUR `linux-wallpaperengine-git`. **`install.sh` does not install it.**
 - Steam Workshop content with `project.json` (`scene`, `video`, or `web`). Steam does not need to be running.
 - `jq`, `python3`, `hyprctl`
