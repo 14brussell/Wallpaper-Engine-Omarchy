@@ -774,7 +774,7 @@ we_status_json() {
       savedThemeBackground: ($config.saved_theme_background // null),
       lastAppliedMonitor: ($config.last_applied.monitor // null),
       lastAppliedWallpaper: ($config.last_applied.wallpaper // null),
-      autoThemeActive: (($config.auto_theme.active // false) and ($theme == $autoThemeSlug)),
+      autoThemeActive: ($config.auto_theme.active // false),
       autoThemePrevious: ($config.auto_theme.previous_theme // null),
       autoThemeSourceMonitor: ($config.auto_theme.source_monitor // null)
     }'
@@ -3120,10 +3120,92 @@ we_theme_exists() {
   [[ -d $WE_USER_THEMES_DIR/$slug || -d /usr/share/omarchy/themes/$slug ]]
 }
 
+we_current_theme_colors_hash() {
+  local colors="$HOME/.local/state/omarchy/current/theme/colors.toml"
+  [[ -f $colors ]] || return 1
+  sha256sum "$colors" | cut -d' ' -f1
+}
+
+we_apply_current_theme_palette() {
+  local theme_dir="$HOME/.local/state/omarchy/current/theme"
+  local colors_payload="" shell_payload="" result
+  [[ -f $theme_dir/colors.toml ]] || {
+    echo "The restored theme has no colors.toml: $theme_dir" >&2
+    return 1
+  }
+  command -v omarchy-shell >/dev/null 2>&1 || return 0
+  colors_payload=$(base64 -w 0 "$theme_dir/colors.toml")
+  if [[ -f $theme_dir/shell.toml ]]; then
+    shell_payload=$(base64 -w 0 "$theme_dir/shell.toml")
+  fi
+  result=$(timeout -k 1 3 omarchy-shell shell applyTheme \
+    "$colors_payload" "$shell_payload" 2>/dev/null) || {
+    echo "The restored theme palette could not be applied to Omarchy Shell." >&2
+    return 1
+  }
+  [[ $result == ok ]] || {
+    echo "Omarchy Shell did not confirm the restored theme palette." >&2
+    return 1
+  }
+}
+
+we_theme_background_matching_hash() {
+  local slug=${1:-} expected=${2:-} candidate actual
+  [[ -n $slug && -n $expected ]] || return 1
+  while IFS= read -r -d '' candidate; do
+    actual=$(sha256sum "$candidate" 2>/dev/null | cut -d' ' -f1)
+    if [[ $actual == "$expected" ]]; then
+      printf '%s\n' "$(realpath "$candidate")"
+      return 0
+    fi
+  done < <(find -L \
+    "$HOME/.config/omarchy/backgrounds/$slug" \
+    "$HOME/.local/state/omarchy/current/theme/backgrounds" \
+    -maxdepth 1 -type f \
+    \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \
+       -o -iname '*.webp' -o -iname '*.gif' -o -iname '*.bmp' \) \
+    -print0 2>/dev/null)
+  return 1
+}
+
+we_restore_current_theme_background() {
+  local slug=${1:-} expected_hash=${2:-} target current restored_hash
+  target=$(we_theme_background_matching_hash "$slug" "$expected_hash" 2>/dev/null || true)
+  current=$(we_current_theme_background)
+  if [[ -z $target ]]; then
+    target=$(we_first_theme_background 2>/dev/null || true)
+  fi
+  if [[ -z $target && -n $current && -f $current ]] \
+    && ! we_is_placeholder "$current"; then
+    case "$current" in
+      "$WE_AUTO_THEME_DIR"/*|"$WE_TRANSITION_DIR"/*|*/.cache/omarchy/background-transitions/*) ;;
+      *) target=$current ;;
+    esac
+  fi
+  [[ -n $target && -f $target ]] && ! we_is_placeholder "$target" || {
+    echo "The restored theme has no usable background." >&2
+    return 1
+  }
+  we_omarchy_bg_set_instant "$target" || return 1
+  current=$(we_current_theme_background)
+  [[ -n $current && -f $current ]] && ! we_is_placeholder "$current" || {
+    echo "The restored theme background is not readable." >&2
+    return 1
+  }
+  if [[ -n $expected_hash ]]; then
+    restored_hash=$(sha256sum "$current" 2>/dev/null | cut -d' ' -f1)
+    [[ $restored_hash == "$expected_hash" ]] || {
+      echo "The previously selected theme background was not restored." >&2
+      return 1
+    }
+  fi
+}
+
 we_apply_auto_theme() {
   we_bg_queue_enter
   we_load_config
   local monitor=${1:-} current previous source stage backup old_state applied_theme
+  local previous_colors_hash="" previous_shell_hash="" previous_background_hash="" previous_background
   local last_applied wallpaper_override="" preferred_source=""
   if [[ -z $monitor ]]; then
     last_applied=$(we_jq -c '.last_applied // {}')
@@ -3154,9 +3236,32 @@ we_apply_auto_theme() {
   previous=$(jq -r '.previous_theme // empty' <<<"$old_state")
   if [[ $current != "$WE_AUTO_THEME_SLUG" ]]; then
     previous=$current
+    previous_colors_hash=$(we_current_theme_colors_hash 2>/dev/null || true)
+    if [[ -f $HOME/.local/state/omarchy/current/theme/shell.toml ]]; then
+      previous_shell_hash=$(sha256sum \
+        "$HOME/.local/state/omarchy/current/theme/shell.toml" | cut -d' ' -f1)
+    fi
+    previous_background=$(we_current_theme_background)
+    if [[ -z $previous_background || ! -f $previous_background ]] \
+      || we_is_placeholder "$previous_background"; then
+      previous_background=$(we_jq -r '.saved_theme_background // empty')
+    fi
+    if [[ -z $previous_background || ! -f $previous_background ]] \
+      || we_is_placeholder "$previous_background"; then
+      previous_background=$(we_first_theme_background 2>/dev/null || true)
+    fi
+    if [[ -n $previous_background && -f $previous_background ]] \
+      && ! we_is_placeholder "$previous_background"; then
+      previous_background_hash=$(sha256sum "$previous_background" | cut -d' ' -f1)
+    fi
   elif [[ -z $previous ]]; then
     echo "The generated theme is already selected, but its prior theme is unknown. Select another theme first." >&2
     return 1
+  fi
+  if [[ $current == "$WE_AUTO_THEME_SLUG" ]]; then
+    previous_colors_hash=$(jq -r '.previous_colors_sha256 // empty' <<<"$old_state")
+    previous_shell_hash=$(jq -r '.previous_shell_sha256 // empty' <<<"$old_state")
+    previous_background_hash=$(jq -r '.previous_background_sha256 // empty' <<<"$old_state")
   fi
   [[ -n $previous && $previous != "$WE_AUTO_THEME_SLUG" ]] || {
     echo "Could not determine a theme to restore before auto-matching." >&2
@@ -3192,11 +3297,17 @@ we_apply_auto_theme() {
     --arg previous "$previous" \
     --arg monitor "$monitor" \
     --arg source "$(realpath "$source")" \
+    --arg previous_colors "$previous_colors_hash" \
+    --arg previous_shell "$previous_shell_hash" \
+    --arg previous_background "$previous_background_hash" \
     '.auto_theme = {
       active: true,
       previous_theme: $previous,
       source_monitor: $monitor,
-      source_image: $source
+      source_image: $source,
+      previous_colors_sha256: $previous_colors,
+      previous_shell_sha256: $previous_shell,
+      previous_background_sha256: $previous_background
     }'
 
   # The synchronous theme-set hook is part of this transaction. Tell our hook
@@ -3217,8 +3328,11 @@ we_apply_auto_theme() {
 we_undo_auto_theme() {
   we_bg_queue_enter
   we_load_config
-  local previous restored_theme
+  local previous restored_theme expected_colors expected_shell expected_background engine_live=true
   previous=$(we_jq -r '.auto_theme.previous_theme // empty')
+  expected_colors=$(we_jq -r '.auto_theme.previous_colors_sha256 // empty')
+  expected_shell=$(we_jq -r '.auto_theme.previous_shell_sha256 // empty')
+  expected_background=$(we_jq -r '.auto_theme.previous_background_sha256 // empty')
   [[ $(we_jq -r '.auto_theme.active // false') == true && -n $previous ]] || {
     echo "No auto-matched theme change is available to undo." >&2
     return 1
@@ -3231,7 +3345,14 @@ we_undo_auto_theme() {
     echo "Undo requires the Omarchy theme command." >&2
     return 1
   }
-  if ! WE_THEME_HOOK_UNDER_BG_QUEUE=1 omarchy theme set "$previous"; then
+  if ! we_engine_running; then
+    engine_live=false
+    we_jq_write '.active = false'
+    we_set_active_flag false
+  fi
+  if ! WE_THEME_HOOK_UNDER_BG_QUEUE=1 WE_AUTO_THEME_INTERNAL_RESTORE=1 \
+      OMARCHY_THEME_SKIP_BACKGROUND=1 \
+      omarchy theme set "$previous"; then
     # Some Omarchy versions can report a hook failure after the theme switch
     # has already committed. Reconcile against the actual theme before leaving
     # auto-match stuck active.
@@ -3241,9 +3362,38 @@ we_undo_auto_theme() {
       return 1
     fi
   fi
+  restored_theme=$(we_current_theme_name)
+  [[ $restored_theme == "$previous" ]] || {
+    echo "Omarchy selected $restored_theme instead of the previous theme: $previous" >&2
+    return 1
+  }
+  if [[ -n $expected_colors \
+    && $(we_current_theme_colors_hash 2>/dev/null || true) != "$expected_colors" ]]; then
+    echo "The previous theme colors were not restored: $previous" >&2
+    return 1
+  fi
+  if [[ -n $expected_shell \
+    && $(sha256sum "$HOME/.local/state/omarchy/current/theme/shell.toml" 2>/dev/null \
+      | cut -d' ' -f1) != "$expected_shell" ]]; then
+    echo "The previous Omarchy Shell theme was not restored: $previous" >&2
+    return 1
+  fi
+  local restore_rc=0
+  if ! $engine_live; then
+    we_restore_current_theme_background "$previous" "$expected_background" || restore_rc=1
+  fi
+  we_apply_current_theme_palette || restore_rc=1
+  (( restore_rc == 0 )) || return 1
   we_jq_write '.auto_theme = {active:false, previous_theme:null, source_monitor:null}'
-  if ! we_engine_running; then
+  if ! $engine_live; then
     we_jq_write '.saved_theme_background = null'
+  elif [[ -n $expected_background ]]; then
+    local restored_background
+    restored_background=$(we_theme_background_matching_hash \
+      "$previous" "$expected_background" 2>/dev/null || true)
+    if [[ -n $restored_background ]]; then
+      we_jq_write --arg p "$restored_background" '.saved_theme_background = $p'
+    fi
   fi
   we_notify "Restored theme $previous"
   echo "Restored Omarchy theme: $previous"

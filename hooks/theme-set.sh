@@ -65,13 +65,20 @@ we_load_config
 # A theme selected outside the auto-match action is itself a valid undo. Clear
 # the toggle state so the panel never offers to restore a stale prior theme.
 auto_active=$(we_jq -r '.auto_theme.active // false')
-if [[ $auto_active == true && $THEME_SLUG != "$WE_AUTO_THEME_SLUG" ]]; then
+if [[ $auto_active == true && $THEME_SLUG != "$WE_AUTO_THEME_SLUG" \
+  && ${WE_AUTO_THEME_INTERNAL_RESTORE:-0} != 1 ]]; then
   we_jq_write '.auto_theme = {active:false, previous_theme:null, source_monitor:null}' || true
 fi
 
 active=$(we_jq -r '.active // false')
-if [[ $active != true ]]; then
+if ! we_engine_running; then
+  [[ $active != true ]] || we_jq_write '.active = false' || true
+  we_set_active_flag false || true
   exit 0
+fi
+if [[ $active != true ]]; then
+  we_jq_write '.active = true' || true
+  we_set_active_flag true || true
 fi
 
 # Prefer the file omarchy-theme-set just linked; fall back to this theme's pool.
