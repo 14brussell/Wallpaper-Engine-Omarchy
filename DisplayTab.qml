@@ -148,7 +148,7 @@ Item {
   readonly property string fontFamily: Style.font.family
   readonly property var scalingOptions: ["fill", "fit", "stretch", "default"]
   readonly property var clampOptions: ["border", "clamp", "repeat"]
-  readonly property var layerOptions: ["bottom", "top", "overlay"]
+  readonly property var layerOptions: ["bottom"]
   readonly property var sectionBorder: Border.controlSpec("normal", fg, Color.accent)
   readonly property color sectionFill: Qt.rgba(fg.r, fg.g, fg.b, 0.03)
 
@@ -377,6 +377,15 @@ Item {
     return out
   }
 
+  // Overlay covers the Omarchy bar; top covers windows. background fights
+  // omarchy.background. Save & apply must never persist those values.
+  function coerceEngineLayer(layer) {
+    var value = String(layer || "bottom")
+    if (value === "bottom")
+      return value
+    return "bottom"
+  }
+
   function buildSetDisplayArgv() {
     var args = [
       resolvedWeBin, "set-display", displayName,
@@ -384,7 +393,7 @@ Item {
       "--scaling", String(scaling),
       "--fps", String(fps),
       "--clamp", String(clampMode),
-      "--layer", String(engineLayer || "bottom")
+      "--layer", coerceEngineLayer(engineLayer)
     ]
     if (silent) {
       args.push("--silent")
@@ -1565,19 +1574,19 @@ Item {
               Dropdown {
                 Layout.fillWidth: true
                 label: "Wayland layer"
-                value: root.engineLayer
+                value: root.coerceEngineLayer(root.engineLayer)
                 options: root.layerOptions
                 foreground: root.fg
                 onChanged: function(v) {
                   root.markDraftEdited()
-                  root.engineLayer = v
+                  root.engineLayer = root.coerceEngineLayer(v)
                 }
               }
 
               Text {
                 textFormat: Text.PlainText
                 Layout.fillWidth: true
-                text: "Bottom is recommended for Omarchy. Top and overlay can cover desktop content."
+                text: "Always uses the bottom Wayland layer so Wallpaper Engine stays under the Omarchy bar. Overlay and top are not available — overlay can hide the bar and make this widget unreachable."
                 color: root.dim
                 wrapMode: Text.WordWrap
                 font.family: root.fontFamily

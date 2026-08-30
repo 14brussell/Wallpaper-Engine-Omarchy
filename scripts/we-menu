@@ -258,7 +258,7 @@ edit_display() {
     scaling=$(jq -r '.scaling' <<<"$effective")
     fps=$(jq -r '.fps' <<<"$effective")
     clamp=$(jq -r '.clamp' <<<"$effective")
-    layer=$(jq -r '.layer' <<<"$effective")
+    layer=$(we_coerce_engine_layer "$(jq -r '.layer' <<<"$effective")")
     silent=$(jq -r '.silent' <<<"$effective")
     volume=$(jq -r '.volume' <<<"$effective")
     noautomute=$(jq -r '.noautomute' <<<"$effective")
@@ -346,8 +346,9 @@ edit_display() {
         save_display_setting "$monitor" "Clamp $selected" --clamp "$selected" || true
         ;;
       "Wayland layer"*)
-        selected=$(printf '%s\n' bottom top overlay \
-          | gum choose --header "Wayland layer (bottom recommended)") || continue
+        selected=$(printf '%s\n' bottom \
+          | gum choose --header "Wayland layer (bottom only; overlay covers the bar)") || continue
+        selected=$(we_coerce_engine_layer "$selected")
         save_display_setting "$monitor" "Layer $selected" --layer "$selected" || true
         ;;
       Audio*)
