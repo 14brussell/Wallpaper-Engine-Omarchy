@@ -67,7 +67,8 @@ set_tree_modes() {
     "$root/scripts/install.sh" \
     "$root/scripts/uninstall.sh" \
     "$root/hooks/post-boot.sh" \
-    "$root/hooks/theme-set.sh"
+    "$root/hooks/theme-set.sh" \
+    "$root/hooks/monitor-watch.sh"
 }
 
 validate_stage() {

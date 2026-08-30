@@ -33,7 +33,9 @@ Commands:
   set-wallpaper-dirs [dir...]  Replace additional roots (empty list clears them)
   monitors [--json]            List displays (name, or JSON with width/height)
   apply [monitor...]           Start/replace only the named display processes;
-                               without names, independently apply all configured displays
+                               without names, apply configured displays that are
+                               currently live in hyprctl (skip disconnected heads)
+  sync-outputs                 Start/stop engines to match live outputs (hotplug)
   stop [monitor...]            Stop named display processes, or all when omitted;
                                restore the prior theme when auto-match was active
   revert                       Stop WE and restore Omarchy theme background
@@ -397,9 +399,10 @@ we_cli_hypr_monitor_labels() {
     raw='[]'
   fi
   jq -c '
+    [.[] | select(.disabled != true)] as $live |
     {
-      monitorNames: [.[] | .name | tostring],
-      monitorTitles: [.[] |
+      monitorNames: [$live[] | .name | tostring],
+      monitorTitles: [$live[] |
         if (.width != null and .height != null and .width > 0 and .height > 0)
         then "\(.name) · \(.width)×\(.height)"
         else (.name | tostring)
@@ -435,7 +438,8 @@ cmd_status_json() {
 }
 
 # Blocking apply: start/replace only the requested display process. There is no
-# QML transition and sibling displays are not restarted.
+# QML transition and sibling displays are not restarted. Bare apply starts only
+# outputs currently reported by hyprctl; disconnected names are skipped.
 cmd_apply() {
   we_load_config
   local -a requested=()
@@ -446,17 +450,12 @@ cmd_apply() {
 
   if ((${#requested[@]} > 0)); then
     local -a live=()
-    if command -v hyprctl >/dev/null 2>&1; then
-      mapfile -t live < <(timeout -k 1 "${WE_HYPRCTL_TIMEOUT_S:-2}" hyprctl monitors -j 2>/dev/null | jq -r '.[].name' || true)
-    fi
-    if ((${#live[@]} == 0)) && declare -F we_list_monitors >/dev/null 2>&1; then
-      mapfile -t live < <(we_list_monitors 2>/dev/null || true)
-    fi
-    if ((${#live[@]} > 0)); then
+    mapfile -t live < <(we_live_monitor_names)
+    if command -v hyprctl >/dev/null 2>&1 || ((${#live[@]} > 0)); then
       for m in "${requested[@]}"; do
-        if ! we_name_in_list "$m" "${live[@]}"; then
+        if ((${#live[@]} == 0)) || ! we_name_in_list "$m" "${live[@]}"; then
           echo "Unknown display: $m (not reported by hyprctl)" >&2
-          printf '  detected: %s\n' "${live[*]}" >&2
+          printf '  detected: %s\n' "${live[*]-}" >&2
           return 1
         fi
       done
@@ -723,6 +722,7 @@ main() {
       fi
       ;;
     apply) cmd_apply "$@" ;;
+    sync-outputs) we_reconcile_live_outputs ;;
     stop) cmd_stop "$@" ;;
     revert) cmd_revert ;;
     auto-theme) cmd_auto_theme "$@" ;;

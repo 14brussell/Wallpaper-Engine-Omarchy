@@ -3,6 +3,8 @@
 #
 # Hyprland already waited ~2s before omarchy-hook post-boot. If Wallpaper Engine
 # was left active last session, relaunch each configured display independently.
+# A socket watcher (same events as omarchy-hyprland-monitor-watch) keeps engines
+# aligned with dock/lid/hotplug after boot.
 
 set -euo pipefail
 
@@ -33,6 +35,10 @@ if [[ ${1:-} == --restore ]]; then
   restore_wallpapers
   exit
 fi
+
+# Always listen for monitor add/remove, even when wallpapers are currently
+# stopped, so a later apply can hotplug without a second login.
+"$ROOT/hooks/monitor-watch.sh" --ensure || true
 
 we_load_config
 
