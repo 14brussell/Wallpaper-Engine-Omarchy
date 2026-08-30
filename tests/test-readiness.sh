@@ -35,6 +35,8 @@ PY
   if we_lwe_fbo_painted "$screenshot"; then
     fail 'uniform-black screenshot fixture was incorrectly considered painted'
   fi
+  [[ $(we_lwe_fbo_state "$screenshot") == clear ]] \
+    || fail 'fully decoded uniform-black screenshot was not classified as clear'
 
   WE_LWE_SCREENSHOT="$screenshot"
   started=$(we_now_ms)
