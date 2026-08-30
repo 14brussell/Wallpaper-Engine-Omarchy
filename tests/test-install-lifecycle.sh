@@ -639,27 +639,23 @@ test_copy_install_prints_reinstall_recipe() {
 }
 
 test_readme_update_leads_with_reinstall() {
-  local update_section remove_line update_line
+  local update_section
   update_section=$(awk '/^### Update$/,/^## Remove$/' "$ROOT/README.md")
   printf '%s\n' "$update_section" | grep -Fq 'one-time reinstall' \
     || fail 'README Update does not say this is a one-time reinstall'
   printf '%s\n' "$update_section" | grep -Fq '~/.config/omarchy/wallpaper-engine/' \
     || fail 'README Update does not say wallpaper-engine config is preserved'
-  printf '%s\n' "$update_section" | grep -Fq 'git merge --ff-only' \
-    || fail 'README Update does not require a fast-forward merge onto main'
   printf '%s\n' "$update_section" | grep -Fq \
     'omarchy plugin add https://github.com/14brussell/Wallpaper-Engine-Omarchy.git --enable' \
     || fail 'README Update is missing the plugin add command'
   printf '%s\n' "$update_section" | grep -Fq 'never invoke' \
     || fail 'README Update does not say platform add/update never runs install.sh'
-  remove_line=$(printf '%s\n' "$update_section" \
-    | grep -n -m1 'omarchy plugin remove io.github.14brussell.wallpaper-engine' \
-    | cut -d: -f1)
-  update_line=$(printf '%s\n' "$update_section" \
-    | grep -n -m1 'omarchy plugin update io.github.14brussell.wallpaper-engine' \
-    | cut -d: -f1)
-  [[ -n $remove_line && -n $update_line && $remove_line -lt $update_line ]] \
-    || fail 'README Update must lead with plugin remove, not plugin update'
+  printf '%s\n' "$update_section" | grep -Fq \
+    'omarchy plugin update io.github.14brussell.wallpaper-engine' \
+    || fail 'README Update is missing the plugin update command'
+  printf '%s\n' "$update_section" | grep -Fq \
+    'omarchy plugin remove io.github.14brussell.wallpaper-engine' \
+    || fail 'README Update is missing the copy-install reinstall remove step'
   ! printf '%s\n' "$update_section" | awk '/^```/,/^```$/' | grep -Fq -- '--purge' \
     || fail 'README Update recipe must not use uninstall.sh --purge'
 }

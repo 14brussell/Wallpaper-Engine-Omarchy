@@ -4,285 +4,144 @@
   <img src="preview.png" alt="Wallpaper Engine for Omarchy interface" width="100%">
 </p>
 
-Omarchy shell plugin that plays [Steam Wallpaper Engine](https://store.steampowered.com/app/431960/) scenes on Hyprland through [Almamu/linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine).
-
-It ships a **Quickshell GUI** (`FloatingWindow`, one tab per Hyprland output), an optional bar widget, Omarchy **Style** menu entries, a gum TUI fallback, and hooks. Browse Workshop wallpapers, set per-display scaling/FPS/clamp/audio/properties, start or stop `linux-wallpaperengine`, and **revert to the current Omarchy theme background**.
-
-## Demo
+Omarchy / Hyprland / Quickshell plugin (`io.github.14brussell.wallpaper-engine` **v1.6.0**) that plays [Steam Wallpaper Engine](https://store.steampowered.com/app/431960/) Workshop items through [Almamu/linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine). Per-display panel and optional bar widget, Style menu entries, gum TUI, boot/theme hooks. **Hyprland + Omarchy only.**
 
 https://github.com/user-attachments/assets/8a745361-9db8-40a0-b371-2725e26a6d5e
 
-Display names and resolutions are detected from each user’s Hyprland setup.
-
-## Highlights
-
-- Quickshell panel with one tab per display, live Running/Stopped badges, and contextual Start/Stop controls for each display
-- Streamlined per-display settings with a stable **Save & apply** action and adjacent severity-aware progress and errors, plus scaling, FPS, clamp, audio, wallpaper properties, and other engine options
-- Workshop browser with thumbnails, wallpaper properties, and a shared catalog and search filter that stay cached while switching display tabs
-- Additional Steam libraries on other disks, managed from the GUI or CLI
-- Seamless per-display replacement that keeps the old wallpaper running until the new one produces a complete rendered frame, rejecting incomplete or blank framebuffer captures
-- Reversible Omarchy color themes generated from the most recently successfully applied wallpaper, with the source remembered across tabs, restarts, and config upgrades
-- Auto-match safeguards that require a live wallpaper and valid captured frame, support one-click undo, and restore the previous theme when the final Wallpaper Engine process stops
-- Theme restore, bar widget, CLI, boot and theme hooks, and an optional gum TUI
-
 ## Requirements
 
-- Omarchy with Hyprland and Quickshell
-- [linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) (`linux-wallpaperengine-git` from the AUR)
-- Wallpaper Engine on Steam, including downloaded Workshop content
-- `jq` and `hyprctl` (included with a normal Omarchy install)
-- `python-pillow` for the wallpaper-to-theme auto-match action
-- `gum` only if you want the advanced TUI
+**Platform:** Omarchy with Hyprland and Quickshell. This plugin is not an AUR package.
 
-Install the non-Steam dependencies through Omarchy before the first apply:
+**Hard (needed before `omarchy-we apply`):**
+
+- [linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) — AUR `linux-wallpaperengine-git`. **`install.sh` does not install it.**
+- Steam Workshop content with `project.json` (`scene`, `video`, or `web`). Steam does not need to be running.
+- `jq`, `python3`, `hyprctl`
+- Omarchy CLI: `omarchy-theme-bg-set`, `omarchy-shell`
+- `~/.local/bin` on `PATH` (installer links `omarchy-we` and `we-omarchy` there)
 
 ```bash
 omarchy pkg aur add linux-wallpaperengine-git
-omarchy pkg add python-pillow
 ```
 
-Open Wallpaper Engine in Steam at least once and download the Workshop items
-you want to use. The installer finishes with `omarchy-we doctor`; treat any
-reported missing engine or image dependency as an incomplete setup.
+**Optional:**
+
+- `python-pillow` — **required for auto-match only** (ImageMagick can still compose stills). Not required to apply a wallpaper.
+- `gum` and `omarchy-launch-tui` — advanced TUI only
+- `grim` / `ffmpeg` — stills and video frames; the engine FBO path does not need them
+- `socat` — Hyprland socket events; without it, monitor-watch polls
+
+**Workshop roots** (every existing path is used, plus extras): `~/.steam`, `~/.local/share/Steam`, Flatpak `com.valvesoftware.Steam`, Snap Steam — each `steamapps/workshop/content/431960`. Extra disks: panel folder button or `omarchy-we set-wallpaper-dirs`.
+
+**Paths:** plugins, config, hooks, and themes live under `~/.config/omarchy`. Runtime state is `~/.local/state/omarchy`. `XDG_CONFIG_HOME` / `XDG_STATE_HOME` are ignored. Install as a **real directory** named `io.github.14brussell.wallpaper-engine`. Do **not** symlink a mixed-case checkout (QML rejects the path).
+
+**Layer:** leave `omarchy.background` enabled. The engine is forced to `--layer bottom`.
+
+`install.sh` ends with `omarchy-we doctor || true`. Treat a missing **engine**, **jq**, **hyprctl**, **python3**, or **omarchy-theme-bg-set** as a broken setup. `gum` / `grim` / `ffmpeg` may show missing and still be optional.
 
 ## Install
 
-Add the plugin, then run the installer. Omarchy does not run plugin installers automatically.
+`omarchy plugin add` **never** runs `install.sh`. Run the installer yourself.
 
 ```bash
 omarchy plugin add https://github.com/14brussell/Wallpaper-Engine-Omarchy.git --enable
 ~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/install.sh
 ```
 
-For local development:
+`plugin add` clones a git checkout. `install.sh` keeps that `.git`, installs Style menu entries and hook wrappers, links `omarchy-we` / `we-omarchy`, and runs `doctor`. Do **not** run `we install-hooks` as a second setup step.
 
-```bash
-/path/to/Wallpaper-Engine-Omarchy/scripts/install.sh
-omarchy plugin enable io.github.14brussell.wallpaper-engine
-```
+Local tree: run that tree's `scripts/install.sh`, then `omarchy plugin enable io.github.14brussell.wallpaper-engine`. Re-run the installer after source changes.
 
-The installer copies the plugin into its canonical directory and links `omarchy-we` and `we-omarchy` into `~/.local/bin`. Do not symlink the repository into `~/.config/omarchy/plugins/`; QML may reject the path because of filename case differences. Re-run the installer after changing the source tree.
+If the legacy `wallpaper-engine-omarchy` id is present, the installer prints migration commands and stops. Config is preserved.
 
-Omarchy discovers plugins, themes, hooks, and menu extensions from its
-canonical `~/.config/omarchy` tree. This plugin deliberately follows those
-paths even when generic XDG directory variables point elsewhere.
+Panel missing: `omarchy-shell shell rescanPlugins`
 
 ### Update
 
-Omarchy does not run plugin installers. `omarchy plugin add` and
-`omarchy plugin update` never invoke `install.sh`; that command is always a
-separate, required step.
+`omarchy plugin add` and `omarchy plugin update` **never invoke** `install.sh`. After every update, run it again.
 
-Typical README installs (and current beta installs) are a **copy** of the
-plugin with no `.git` directory. `omarchy plugin update` cannot refresh those.
-This is a **one-time reinstall**. Configuration in
-`~/.config/omarchy/wallpaper-engine/` is preserved. Do not run
-`uninstall.sh --purge` unless you want a factory wipe.
-
-```bash
-omarchy plugin remove io.github.14brussell.wallpaper-engine
-omarchy plugin add https://github.com/14brussell/Wallpaper-Engine-Omarchy.git --enable
-~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/install.sh
-```
-
-If the plugin directory is already a git checkout
-(`~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/.git`), later
-updates are:
+Git checkout (`…/io.github.14brussell.wallpaper-engine/.git` — the normal `plugin add` path):
 
 ```bash
 omarchy plugin update io.github.14brussell.wallpaper-engine
 ~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/install.sh
 ```
 
-Installed hooks are small wrappers around the current plugin sources, so hook
-fixes take effect with the updated checkout rather than leaving copied older
-logic behind.
-
-When landing this branch on `main`, use a fast-forward only
-(`git checkout main && git merge --ff-only beta && git push`). Do not squash
-or create a merge commit; `omarchy plugin update` cannot fast-forward a
-rewritten history.
-
-If the installer finds the legacy `wallpaper-engine-omarchy` plugin ID, it stops
-before making changes and prints the exact migration commands. Remove the legacy
-plugin first, then re-run the installer; the shared wallpaper configuration is
-preserved across the ID migration.
-
-If the panel does not appear, rescan plugins:
+Copy installs with **no** `.git` cannot use `plugin update`. This is a **one-time reinstall** (config in `~/.config/omarchy/wallpaper-engine/` is kept). Never `--purge` for an update.
 
 ```bash
-omarchy-shell shell rescanPlugins
-```
-
-Plugin validation:
-
-```bash
-omarchy plugin validate ./Wallpaper-Engine-Omarchy
+omarchy plugin remove io.github.14brussell.wallpaper-engine
+omarchy plugin add https://github.com/14brussell/Wallpaper-Engine-Omarchy.git --enable
+~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/install.sh
 ```
 
 ## Remove
+
+Run `uninstall.sh` **before** `omarchy plugin remove` (while the plugin files still exist):
 
 ```bash
 ~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/uninstall.sh
 omarchy plugin remove io.github.14brussell.wallpaper-engine
 ```
 
-Run the helper first, while the plugin files still exist. It restores the theme background and removes plugin-owned integrations. Configuration and runtime state are kept.
+Default: restore theme background, remove plugin-owned hooks/menu/CLI links. **Keeps** `~/.config/omarchy/wallpaper-engine/` and `~/.local/state/omarchy/wallpaper-engine/`. Does **not** delete the plugin tree (that is `plugin remove`), Steam, Workshop content, or `linux-wallpaperengine`.
 
-For a factory-clean removal, explicitly purge the plugin configuration and
-runtime state before asking Omarchy to remove the checkout:
+`--purge` also deletes that config, state, and the generated `wallpaper-engine-auto-match` theme (ownership marker required). Irreversible. Never `--purge` to update.
 
 ```bash
 ~/.config/omarchy/plugins/io.github.14brussell.wallpaper-engine/scripts/uninstall.sh --purge
 omarchy plugin remove io.github.14brussell.wallpaper-engine
 ```
 
-`--purge` is irreversible. It also removes the generated
-`wallpaper-engine-auto-match` theme when its ownership marker is present, but
-does not uninstall Omarchy, Wallpaper Engine, `linux-wallpaperengine`, or any
-other dependency.
-
 ## Usage
 
-- **Style → Wallpaper Engine:** open the panel
-- **Style → Revert to theme background:** stop Wallpaper Engine and restore the theme
-- **Style → Wallpaper Engine (advanced TUI):** open the gum interface
-- **Bar widget:** left-click toggles the panel, middle-click opens the TUI, and right-click restores the theme
+- **Style → Wallpaper Engine** — panel
+- **Style → Revert to theme background** — stop engines, restore theme
+- **Style → Wallpaper Engine (advanced TUI)** — gum TUI (`omarchy-we` with no args is the same; needs a TTY)
+- **Bar widget:** left-click toggles the panel, middle-click TUI, right-click revert
 
-### GUI (tab per display)
+`omarchy-we panel` · `omarchy-we menu` · `omarchy-we doctor`
 
-Open it from the Style menu, bar widget, or `omarchy-we panel`. Each live
-Hyprland display gets its own tab, with **Start** and **Stop** directly below it
-for that display's process. Choose a wallpaper, adjust its settings, and click
-**Save & apply**. **Clear & stop** removes only that display's saved
-configuration and stops its wallpaper process.
+### Panel
 
-The panel supports keyboard operation: Tab moves through actions and fields,
-arrow keys move across display tabs and wallpaper rows, and Enter or Space
-activates the focused choice. Destructive Clear and unsaved-change discards
-require confirmation.
+One tab per live Hyprland output. Pick a wallpaper, set scaling/FPS/clamp/audio/properties, **Save & apply**. Per-tab **Start** / **Stop**. **Clear & stop** drops that display’s saved config. Folder button adds extra Workshop libraries (Steam library, `steamapps`, or `workshop/content/431960`). Catalog and search stay cached across tabs.
 
-Use the folder button beside **Workshop Wallpapers** to add libraries from
-other disks. You can paste a Steam library directory, its `steamapps`
-directory, or the exact `workshop/content/431960` directory. Added folders are
-shared by every display and automatic Steam locations remain enabled.
+**Auto-match theme** needs a live plugin-owned engine and a successfully applied source frame. Writes only `~/.config/omarchy/themes/wallpaper-engine-auto-match`. Button becomes **Undo theme match**. Last engine stop with auto-match on restores the previous theme. CLI: `omarchy-we auto-theme [monitor]` / `omarchy-we undo-auto-theme`.
 
-The lifecycle controls below the selected tab are display-specific:
+Replacement waits for a complete rendered frame, then stops the old process. Failed start keeps the previous wallpaper. Scene crash before first frame: one retry with particles disabled.
 
-- **Start:** start the selected display's saved wallpaper process
-- **Stop:** stop only the selected display's process. If it is the final process and auto-match is active, restore the previously selected Omarchy theme.
-
-The theme controls above the tabs remain global:
-
-- **Revert to theme:** stop them and restore the Omarchy theme background
-- **Auto-match theme:** build and apply an accessible Omarchy palette from the most recently successfully applied wallpaper, regardless of which display tab is selected. Starting a new match requires both a successfully applied source frame and a currently running plugin-owned wallpaper process. The button becomes **Undo theme match** and restores the previously selected theme.
-
-Auto-match writes only to the plugin-owned custom theme at
-`~/.config/omarchy/themes/wallpaper-engine-auto-match`. It refuses to overwrite
-that path if it contains a theme not created by this plugin. Choosing another
-Omarchy theme manually also clears the pending auto-match undo state.
-
-### Advanced TUI
-
-Run `omarchy-we menu` for the keyboard-driven fallback.
-
-![Wallpaper Engine advanced TUI](assets/screenshots/advanced-tui.png)
-
-## How it works with Omarchy themes
-
-```
-Omarchy: omarchy.background  →  WlrLayer.Background  (static image symlink)
-WE:      linux-wallpaperengine --layer bottom         (covers the static layer)
-```
-
-- Keep Wallpaper Engine on the `bottom` layer; `background` conflicts with `omarchy.background`.
-- Leave the Omarchy background service enabled.
-- Apply, stop, revert, and theme changes are locked to prevent overlapping operations.
-
-### Reliable per-display runtime
-
-Each configured display has its own `linux-wallpaperengine` process. Applying a wallpaper starts a replacement, waits for its first rendered frame, then stops the old process. If startup fails, the previous wallpaper stays visible. Other displays are unaffected.
-
-`we apply` starts every *live* configured display independently. Disconnected or lid-disabled outputs are skipped so apply and post-boot do not wait 15s per stale head. `we apply <monitor>` updates only one live output. If a Scene exits before rendering, the plugin retries once with particles disabled and saves that setting if the retry succeeds.
-
-A Hyprland socket watcher (same `monitoraddedv2` / `monitorremovedv2` events as Omarchy's monitor-watch) starts a configured engine when that output returns and stops it when the output disappears, without replacing Omarchy's clamshell watcher. Leave `omarchy.background` enabled.
-
-Optional readiness tuning: `WE_LWE_READY_MS`, `WE_LWE_READBACK_GRACE_MS`, and
-`WE_LWE_PAINT_EPS`. `WE_LWE_SCREENSHOT_DELAY` is limited to 0–5 frames by the
-current linux-wallpaperengine release and defaults to that upstream maximum.
-
-### Hooks
-
-- `post-boot.d/50-wallpaper-engine` restarts saved wallpapers when `active=true`, and starts a Hyprland monitor watcher so dock/lid/HDMI changes can start or stop per-output engines.
-- `theme-set.d/50-wallpaper-engine` records the new theme background for the next revert.
-
-Install them with `we install-hooks`.
-
-## Config
-
-Configuration is stored in `~/.config/omarchy/wallpaper-engine/config.json`. The installer creates the defaults; this is the basic shape:
-
-```json
-{
-  "version": 1,
-  "engine": "linux-wallpaperengine",
-  "assets_dir": "",
-  "nvidia_workaround": false,
-  "defaults": {
-    "scaling": "fill",
-    "fps": 30,
-    "silent": true
-  },
-  "displays": {
-    "<display-name>": {
-      "wallpaper": "823274093",
-      "scaling": "fill",
-      "fps": 30,
-      "properties": { "rate": "1.0" }
-    }
-  },
-  "active": false
-}
-```
-
-Set `"nvidia_workaround": true` to run the engine with `__GL_THREADED_OPTIMIZATIONS=0`.
-
-- Runtime state and logs: `~/.local/state/omarchy/wallpaper-engine/`
-- Workshop projects: Steam `workshop/content/431960/<id>/project.json`
-- Extra Workshop locations: manage them from the folder button in the GUI, or
-  run `omarchy-we set-wallpaper-dirs <path>...`
-
-## CLI
+### CLI
 
 ```bash
+omarchy-we                  # menu (TUI; needs a TTY)
 omarchy-we panel
-omarchy-we apply [monitor]
-omarchy-we stop
+omarchy-we doctor
+omarchy-we apply [monitor…] # no names: live configured heads only
+omarchy-we stop [monitor…]  # no names: all plugin engines
 omarchy-we revert
 omarchy-we auto-theme [monitor]
 omarchy-we undo-auto-theme
-omarchy-we menu
-omarchy-we monitors
-omarchy-we status --json
+omarchy-we set-wallpaper-dirs <path>…
 ```
 
-Wallpaper-specific properties use `omarchy-we properties <id>` and `omarchy-we set-property <monitor> <name> <value>`. Not every wallpaper exposes a playback-speed property.
+`apply` / `stop` take one or more monitors. Disconnected or lid-disabled outputs are skipped. `omarchy-we properties <id>` and `omarchy-we set-property <monitor> <name> <value>` for wallpaper-specific keys.
 
-## Layout
+### Hooks and files
 
-```
-Panel.qml / DisplayTab.qml   Quickshell UI
-BarWidget.qml                Bar launcher
-bin/we                       CLI
-lib/common.sh                Engine and theme integration
-lib/generate_theme.py        Wallpaper palette generator
-scripts/                     Installer, TUI, and menu helpers
-hooks/                       Boot, theme, and Hyprland monitor-watch hooks
-```
+`install.sh` already installs these wrappers (they exec current plugin sources):
+
+- `~/.config/omarchy/hooks/post-boot.d/50-wallpaper-engine` — if `active=true`, restore saved wallpapers; `--ensure`s monitor-watch
+- `~/.config/omarchy/hooks/theme-set.d/50-wallpaper-engine` — remember the real theme background for revert; does **not** tear down a live wallpaper
+
+**monitor-watch is not a third Omarchy hook.** Post-boot starts it. It listens for Hyprland `monitoraddedv2` / `monitorremovedv2` and runs `omarchy-we sync-outputs`. It does **not** reconcile on `configreloaded` (that was tearing down live engines). Does not replace Omarchy’s clamshell watcher.
+
+- Config: `~/.config/omarchy/wallpaper-engine/config.json`
+- State / logs: `~/.local/state/omarchy/wallpaper-engine/`
+
+Set `"nvidia_workaround": true` to run the engine with `__GL_THREADED_OPTIMIZATIONS=0`.
 
 ## Limitations
 
-- Mirroring is unavailable because `linux-wallpaperengine` has no general flip option. Wallpaper-specific flip properties still appear when supported.
-- Playback-speed, audio-reactive, and mouse-interactive behavior depends on the wallpaper and `linux-wallpaperengine` support.
-- Some Workshop wallpapers can crash the underlying `linux-wallpaperengine` process. Wallpaper Engine projects may contain Scene data, older particle effects, 3D features, scripts, or Web content that the Linux reimplementation does not fully support. Unexpected project data can also expose bugs in the engine. These are upstream compatibility failures, not crashes caused by this plugin; the plugin starts and manages `linux-wallpaperengine`, but does not render the wallpaper.
-- If the engine exits before its first frame, the plugin leaves the previous wallpaper running. Scene wallpapers are retried once with particles disabled, and each display remains isolated in its own process. Engine output is saved under `~/.local/state/omarchy/wallpaper-engine/` for troubleshooting. See the [linux-wallpaperengine issue tracker](https://github.com/Almamu/linux-wallpaperengine/issues) for upstream compatibility reports.
+- No general mirror/flip (`linux-wallpaperengine`); wallpaper-specific flip properties still appear when present.
+- Playback speed, audio-reactive, and mouse features depend on the wallpaper and the engine.
+- Some Workshop items crash or fail to render in `linux-wallpaperengine` (Scene/particles/3D/scripts/Web). Those are [upstream](https://github.com/Almamu/linux-wallpaperengine/issues) compatibility issues; this plugin starts and manages the process only.
