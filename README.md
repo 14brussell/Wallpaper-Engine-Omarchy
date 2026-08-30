@@ -141,7 +141,9 @@ Each configured display has its own `linux-wallpaperengine` process. Applying a 
 
 `we apply` starts every configured display independently. `we apply <monitor>` updates only one. If a Scene exits before rendering, the plugin retries once with particles disabled and saves that setting if the retry succeeds.
 
-Optional readiness tuning: `WE_LWE_READY_MS`, `WE_LWE_SCREENSHOT_DELAY`, and `WE_LWE_PAINT_EPS`.
+Optional readiness tuning: `WE_LWE_READY_MS`, `WE_LWE_READBACK_GRACE_MS`, and
+`WE_LWE_PAINT_EPS`. `WE_LWE_SCREENSHOT_DELAY` is limited to 0–5 frames by the
+current linux-wallpaperengine release and defaults to that upstream maximum.
 
 ### Hooks
 

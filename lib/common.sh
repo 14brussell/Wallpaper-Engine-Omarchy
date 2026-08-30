@@ -905,8 +905,9 @@ we_save_theme_background_if_needed() {
 #      --screenshot $STATE/lwe-ready.jpg (FBO dump; process keeps running).
 #   5. Wait until LWE is mapped on every apply output, setInstant placeholder
 #      under LWE, poll the FBO dump for structure (not grim, not mean luma),
-#      THEN instant-hide. Never hide on a short pad while the overlay still
-#      covers — a missing or still-clear dump means LWE is black.
+#      THEN instant-hide. The sole exception is the exact upstream OpenGL
+#      readback failure, guarded by replacement-PID layer ownership and grace.
+#      Never infer readiness from an unexplained missing or clear dump.
 # If overlay never covers, apply still stop+starts LWE (hard cut). Never no-op.
 # Do not hide at wipe-done or at hyprctl map — both reveal black.
 #
@@ -915,6 +916,9 @@ we_save_theme_background_if_needed() {
 # WE_LWE_READY_MS is the max wait for a structured FBO (not a hide-anyway pad).
 # Large Scene packages can spend several seconds loading assets and compiling
 # shaders before the delayed screenshot is written. LWE has no ready IPC.
+# linux-wallpaperengine r627 clamps --screenshot-delay to 0..5 frames. Some
+# drivers also fail its FBO readback even while the compositor shows a healthy
+# layer; WE_LWE_READBACK_GRACE_MS gates that narrowly detected fallback.
 # WE_BG_CANVAS_WAIT_MS covers pre-map grim/ffmpeg still generation only.
 WE_BG_REVEAL_MS="${WE_BG_REVEAL_MS:-420}"
 WE_BG_REVEAL_LOAD_MS="${WE_BG_REVEAL_LOAD_MS:-160}"
@@ -926,9 +930,10 @@ WE_BG_OVERLAY_COVER_MS="${WE_BG_OVERLAY_COVER_MS:-2500}"
 WE_BG_OVERLAY_DONE_MS="${WE_BG_OVERLAY_DONE_MS:-2500}"
 WE_BG_LAYER_WAIT_MS="${WE_BG_LAYER_WAIT_MS:-1500}"
 WE_LWE_READY_MS="${WE_LWE_READY_MS:-15000}"
+WE_LWE_READBACK_GRACE_MS="${WE_LWE_READBACK_GRACE_MS:-1000}"
 WE_LWE_SCREENSHOT="${WE_LWE_SCREENSHOT:-$WE_STATE_DIR/lwe-ready.jpg}"
-# Empty = 1s of frames, clamped 30–45. First LWE frames are a black clear.
-WE_LWE_SCREENSHOT_DELAY="${WE_LWE_SCREENSHOT_DELAY:-}"
+# Upstream accepts the option but clamps it to five frames; mirror that limit.
+WE_LWE_SCREENSHOT_DELAY="${WE_LWE_SCREENSHOT_DELAY:-5}"
 WE_LWE_PAINT_EPS="${WE_LWE_PAINT_EPS:-8}"
 WE_GRIM_TIMEOUT_S="${WE_GRIM_TIMEOUT_S:-8}"
 WE_FFMPEG_TIMEOUT_S="${WE_FFMPEG_TIMEOUT_S:-6}"
@@ -1254,6 +1259,40 @@ we_engine_layer_mapped() {
   return 0
 }
 
+# True only when the specified process owns the LWE layer. During per-display
+# replacement the old and new renderers overlap, so namespace alone can match
+# the old wallpaper and is not a readiness signal for the replacement.
+we_engine_pid_layer_mapped() {
+  local pid=${1:-}
+  shift || true
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  command -v hyprctl >/dev/null 2>&1 || return 1
+  local json
+  json=$(timeout -k 1 "${WE_HYPRCTL_TIMEOUT_S:-2}" hyprctl layers -j 2>/dev/null) || return 1
+  if (($# == 0)); then
+    jq -e --arg pid "$pid" '
+      [.. | objects
+        | select(.namespace == "linux-wallpaperengine"
+          and ((.alpha // 0) > 0)
+          and ((.pid // "") | tostring) == $pid)]
+      | length > 0
+    ' >/dev/null 2>&1 <<<"$json"
+    return
+  fi
+  local m
+  for m in "$@"; do
+    [[ -n $m ]] || continue
+    jq -e --arg m "$m" --arg pid "$pid" '
+      [(.[$m] // {}) | .. | objects
+        | select(.namespace == "linux-wallpaperengine"
+          and ((.alpha // 0) > 0)
+          and ((.pid // "") | tostring) == $pid)]
+      | length > 0
+    ' >/dev/null 2>&1 <<<"$json" || return 1
+  done
+  return 0
+}
+
 we_wait_engine_layer() {
   local timeout=${1:-$WE_BG_LAYER_WAIT_MS}
   shift || true
@@ -1281,20 +1320,70 @@ we_lwe_fbo_painted() {
   we_compose_py painted "$path" --epsilon "$eps" >/dev/null 2>&1
 }
 
+# True only for linux-wallpaperengine's known FBO readback failure. Keep this
+# exact: a merely black screenshot must not be promoted to a successful apply.
+we_lwe_fbo_readback_failed() {
+  local log_file=${1:-} monitor=${2:-}
+  [[ -n $log_file && -f $log_file && -n $monitor ]] || return 1
+  grep -Fq -- "Cannot obtain pixel data for screen $monitor. OpenGL error: 1282" "$log_file"
+}
+
+# The screenshot is one-shot. If its readback failed but the replacement PID
+# owns the target layer, keep the old renderer/overlay in place for a bounded
+# grace period and require both process identity and layer ownership to remain
+# stable. This handles an unavailable probe, never an arbitrary black frame.
+we_wait_lwe_readback_grace() {
+  local engine_pid=${1:-} engine_start=${2:-} monitor=${3:-} log_file=${4:-}
+  local timeout=${5:-$WE_LWE_READBACK_GRACE_MS}
+  local start now
+  we_lwe_fbo_readback_failed "$log_file" "$monitor" || return 1
+  we_is_engine_pid "$engine_pid" "$engine_start" || return 1
+  we_engine_pid_layer_mapped "$engine_pid" "$monitor" || return 1
+  start=$(we_now_ms)
+  we_transition_log "LWE FBO readback unavailable on $monitor; holding PID $engine_pid for ${timeout}ms grace"
+  while true; do
+    we_is_engine_pid "$engine_pid" "$engine_start" || {
+      we_transition_log "LWE exited during readback fallback grace"
+      return 1
+    }
+    we_engine_pid_layer_mapped "$engine_pid" "$monitor" || {
+      we_transition_log "LWE PID $engine_pid lost its $monitor layer during readback fallback grace"
+      return 1
+    }
+    now=$(we_now_ms)
+    if (( now - start >= timeout )); then
+      we_transition_log "LWE ready via guarded readback fallback on $monitor (PID $engine_pid)"
+      return 0
+    fi
+    sleep 0.05
+  done
+}
+
 # Overlay still shows TO. hyprctl map/alpha is not a paint signal.
-# Poll the FBO screenshot until it exists AND has structure. Return 1 at
-# WE_LWE_READY_MS without treating that as "hide anyway" — caller keeps cover.
-# Optional PID/starttime arguments let callers fail immediately if LWE exits.
+# Poll until the one-shot FBO screenshot exists and is complete. A structured
+# image is confirmed paint; a valid clear image fails immediately unless the
+# exact guarded readback fallback above succeeds. Return 1 at WE_LWE_READY_MS
+# for a missing/incomplete image. Optional identity, monitor, and log arguments
+# let per-display replacements use the fallback and fail if LWE exits.
 we_wait_engine_first_paint() {
   local timeout=${1:-$WE_LWE_READY_MS}
-  local engine_pid=${2:-} engine_start=${3:-}
+  local engine_pid=${2:-} engine_start=${3:-} monitor=${4:-} log_file=${5:-}
   local start now
   start=$(we_now_ms)
-  we_transition_log "polling LWE FBO $WE_LWE_SCREENSHOT (max ${timeout}ms; hide only when structured)"
+  we_transition_log "polling LWE FBO $WE_LWE_SCREENSHOT (max ${timeout}ms; require structure or guarded readback fallback)"
   while true; do
     if we_lwe_fbo_painted; then
       we_transition_log "LWE FBO painted"
       return 0
+    fi
+    if [[ -f $WE_LWE_SCREENSHOT ]] && we_file_is_image "$WE_LWE_SCREENSHOT"; then
+      if [[ -n $engine_pid && -n $engine_start && -n $monitor && -n $log_file ]] \
+        && we_wait_lwe_readback_grace \
+          "$engine_pid" "$engine_start" "$monitor" "$log_file"; then
+        return 0
+      fi
+      we_transition_log "LWE FBO is a complete clear image; one-shot readiness probe failed"
+      return 1
     fi
     if [[ -n $engine_pid && -n $engine_start ]] \
       && ! we_is_engine_pid "$engine_pid" "$engine_start"; then
@@ -1314,17 +1403,12 @@ we_wait_engine_first_paint() {
   done
 }
 
-# --screenshot-delay is frames. First ~5 are a black clear; wait ~1s of frames.
+# --screenshot-delay is frames, but upstream r627 clamps it to 0..5. Keep the
+# plugin value honest instead of implying that a larger configured delay works.
 we_lwe_screenshot_delay() {
-  local fps=${1:-30} delay
-  if [[ -n ${WE_LWE_SCREENSHOT_DELAY:-} && $WE_LWE_SCREENSHOT_DELAY =~ ^[0-9]+$ ]]; then
-    printf '%s\n' "$WE_LWE_SCREENSHOT_DELAY"
-    return 0
-  fi
-  delay=$fps
-  [[ $delay =~ ^[0-9]+$ ]] || delay=30
-  (( delay < 30 )) && delay=30
-  (( delay > 45 )) && delay=45
+  local delay=${WE_LWE_SCREENSHOT_DELAY:-5}
+  [[ $delay =~ ^[0-9]+$ ]] || delay=5
+  (( delay > 5 )) && delay=5
   printf '%s\n' "$delay"
 }
 
@@ -2746,7 +2830,8 @@ we_start_engine_monitor() {
     return 1
   fi
 
-  we_wait_engine_first_paint "$WE_LWE_READY_MS" "$engine_pid" "$engine_start" || painted=false
+  we_wait_engine_first_paint \
+    "$WE_LWE_READY_MS" "$engine_pid" "$engine_start" "$monitor" "$log_file" || painted=false
   we_is_engine_pid "$engine_pid" "$engine_start" || engine_alive=false
   if ! $painted || ! $engine_alive; then
     we_terminate_identity "$engine_pid $engine_start"
