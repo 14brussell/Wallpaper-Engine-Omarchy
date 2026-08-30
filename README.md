@@ -4,13 +4,13 @@
   <img src="preview.png" alt="Wallpaper Engine for Omarchy interface" width="100%">
 </p>
 
-Omarchy / Hyprland / Quickshell plugin (`io.github.14brussell.wallpaper-engine` **v1.6.0**) that plays [Steam Wallpaper Engine](https://store.steampowered.com/app/431960/) Workshop items through [Almamu/linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine). Per-display panel and optional bar widget, Style menu entries, gum TUI, boot/theme hooks. **Hyprland + Omarchy only.**
+Omarchy / Hyprland / Quickshell plugin that plays [Steam Wallpaper Engine](https://store.steampowered.com/app/431960/) Workshop items through [Almamu/linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine). Per-display panel and optional bar widget, Style menu entries, gum TUI, boot/theme hooks. **Hyprland + Omarchy only.**
 
 https://github.com/user-attachments/assets/8a745361-9db8-40a0-b371-2725e26a6d5e
 
 ## Requirements
 
-**Platform:** Omarchy with Hyprland and Quickshell. This plugin is not an AUR package.
+**Platform:** Omarchy with Hyprland and Quickshell.
 
 **Hard (needed before `omarchy-we apply`):**
 
