@@ -28,4 +28,6 @@ while (( i < 20 )); do
 done
 sleep 1
 
-"$ROOT/bin/we" apply >/dev/null 2>&1 || true
+# A boot restore is not a new user choice. Preserve whichever wallpaper was
+# most recently applied interactively as the default auto-match source.
+WE_PRESERVE_LAST_APPLIED=1 "$ROOT/bin/we" apply >/dev/null 2>&1 || true

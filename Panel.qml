@@ -8,8 +8,8 @@ import qs.Commons
 import qs.Ui
 
 // Wallpaper Engine control surface — tileable FloatingWindow (no modal scrim).
-// One tab per detected display; settings + Apply live inside DisplayTab.
-// Global actions: Start, Stop, Revert background, and reversible auto-theme.
+// One tab per detected display; lifecycle controls + settings live inside
+// DisplayTab. Only theme-wide actions remain in the global header.
 Item {
   id: root
 
@@ -38,6 +38,8 @@ Item {
   property string themeName: ""
   property bool autoThemeActive: false
   property string autoThemePrevious: ""
+  property string autoThemeSourceMonitor: ""
+  property string lastAppliedMonitor: ""
   property var extraWallpaperDirs: []
   property var wallpaperDirsDraft: []
   property string wallpaperDirsError: ""
@@ -60,17 +62,10 @@ Item {
     return (typeof n === "number" && isFinite(n) && n > 0) ? Math.floor(n) : 0
   }
 
-  // Running = live process; Configured = wallpapers saved but engine not up; else Stopped.
-  readonly property bool canStartEngine: !engineRunning && hasConfiguredDisplays
-  readonly property string statusLabel: engineRunning
-    ? "Running"
-    : (hasConfiguredDisplays || active ? "Configured" : "Stopped")
-  readonly property color statusColor: engineRunning
-    ? Color.accent
-    : ((hasConfiguredDisplays || active) ? Qt.lighter(Color.accent, 1.35) : dim)
-  readonly property string startHint: hasConfiguredDisplays
-    ? "Start linux-wallpaperengine with saved display settings"
-    : "Pick a wallpaper on a display tab and Apply first"
+  // The header badge reports live engine process state only. Saved display
+  // configuration is surfaced separately and must not masquerade as runtime.
+  readonly property string statusLabel: engineRunning ? "Running" : "Stopped"
+  readonly property color statusColor: engineRunning ? Color.accent : dim
   // Single source of truth for caption + tab highlight + stack + tabActive.
   readonly property string currentMonitor: {
     if (displayCount === 0) return ""
@@ -89,6 +84,24 @@ Item {
     if (!currentMonitor.length || !displays || typeof displays !== "object") return false
     var display = displays[currentMonitor]
     return !!(display && root.asJsString(display.wallpaper).length)
+  }
+  readonly property bool autoThemeHasSource: lastAppliedMonitor.length > 0
+    || currentHasWallpaper
+  readonly property string autoThemeHint: {
+    if (autoThemeActive) {
+      return autoThemeSourceMonitor.length
+        ? ("Theme colors are matched to the wallpaper applied on "
+          + autoThemeSourceMonitor + ".")
+        : "Theme colors are matched to the previously applied wallpaper."
+    }
+    if (lastAppliedMonitor.length) {
+      return "Uses the most recently applied wallpaper by default ("
+        + lastAppliedMonitor + ")."
+    }
+    if (currentHasWallpaper) {
+      return "Uses the most recently applied wallpaper by default. Until one is recorded, the selected display is used."
+    }
+    return "Uses the most recently applied wallpaper by default. Save & apply a wallpaper first."
   }
   readonly property bool savingWallpaperDirs: actionProc.running
     && actionProc.actionName === "set-wallpaper-dirs"
@@ -443,7 +456,7 @@ Item {
     return name.charAt(0).toUpperCase() + name.slice(1)
   }
 
-  // Start / Stop / Revert use argv Process calls only. Nested shell IPC is not
+  // Global theme actions use argv Process calls only. Nested shell IPC is not
   // part of wallpaper lifecycle. waitForEnd:false + watchdog bounds the UI.
   function runWe(args, actionLabel) {
     if (actionProc.running || root.displayBusy) {
@@ -513,25 +526,17 @@ Item {
     Qt.callLater(function() { root.refresh() })
   }
 
-  function stopEngine() { runWe(["stop"], "Stopping…") }
   function revertTheme() { runWe(["revert"], "Restoring…") }
   function toggleAutoTheme() {
     if (autoThemeActive)
       runWe(["undo-auto-theme"], "Restoring previous theme…")
+    else if (lastAppliedMonitor.length)
+      runWe(["auto-theme"], "Matching the most recently applied wallpaper…")
     else if (currentHasWallpaper)
       runWe(["auto-theme", currentMonitor], "Matching theme colors…")
     else
-      statusMessage = "Pick a wallpaper on this display before auto-matching its theme"
+      statusMessage = "Save & apply a wallpaper before auto-matching its theme"
   }
-  function startEngine() {
-    if (!canStartEngine) {
-      statusMessage = startHint
-      return
-    }
-    // Global start: apply every configured display, not only the open tab.
-    runWe(["apply"], "Starting displays…")
-  }
-
   // Clamp + optionally force index 0. All UI (caption, highlight, stack, tabActive)
   // reads currentTabIndex / currentMonitor — never a parallel TabBar index.
   function selectTab(index, forceReload) {
@@ -592,6 +597,8 @@ Item {
       themeName = root.qmlString(data.theme)
       autoThemeActive = root.qmlBool(data.autoThemeActive)
       autoThemePrevious = root.qmlString(data.autoThemePrevious)
+      autoThemeSourceMonitor = root.qmlString(data.autoThemeSourceMonitor)
+      lastAppliedMonitor = root.qmlString(data.lastAppliedMonitor)
       extraWallpaperDirs = root.qmlStringList(data.extraWallpaperDirs)
       defaults = root.qmlPlain(data.defaults) || ({})
       displays = root.qmlPlain(data.displays) || ({})
@@ -710,10 +717,10 @@ Item {
     onTriggered: {
       if (!root.displayBusy) return
       root.displayBusy = false
-      if (root.busyAction === "Applying…" && !actionProc.running)
+      if (!actionProc.running)
         root.busyAction = ""
       if (!root.statusMessage.length)
-        root.statusMessage = "Apply timed out"
+        root.statusMessage = "Display action timed out"
     }
   }
 
@@ -775,7 +782,7 @@ Item {
         anchors.margins: Style.space(16)
         spacing: Style.space(12)
 
-        // ---- Section: header + status + global actions
+        // ---- Section: header + status + global theme actions
         BorderSurface {
           Layout.fillWidth: true
           implicitHeight: headerCol.implicitHeight + Style.space(28)
@@ -828,6 +835,23 @@ Item {
                 }
               }
 
+              Text {
+                textFormat: Text.PlainText
+                Layout.fillWidth: true
+                Layout.maximumWidth: Style.space(420)
+                visible: !root.engineRunning && !root.applyInFlight
+                  && root.statusMessage.length === 0
+                text: root.hasConfiguredDisplays
+                  ? "No display processes are running — use Start inside the display tab you want."
+                  : "No wallpapers configured — pick one on a display tab, then Save & apply."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                horizontalAlignment: Text.AlignRight
+                verticalAlignment: Text.AlignVCenter
+                wrapMode: Text.WordWrap
+              }
+
               BorderSurface {
                 implicitWidth: statusText.implicitWidth + Style.space(16)
                 implicitHeight: statusText.implicitHeight + Style.space(8)
@@ -863,27 +887,7 @@ Item {
               spacing: Style.space(8)
 
               Button {
-                text: "Start"
-                iconText: "󰐊"
-                foreground: root.fg
-                accent: Color.accent
-                active: root.canStartEngine
-                bordered: true
-                visible: !root.engineRunning
-                enabled: !actionProc.running && !root.displayBusy && root.canStartEngine
-                onClicked: root.startEngine()
-              }
-
-              Button {
-                text: "Stop"
-                iconText: "󰓛"
-                foreground: root.fg
-                bordered: true
-                enabled: !actionProc.running && !root.displayBusy && (root.engineRunning || root.active)
-                onClicked: root.stopEngine()
-              }
-
-              Button {
+                id: autoThemeButton
                 text: root.autoThemeActive
                   ? "Undo theme match"
                   : "Auto-match theme"
@@ -894,7 +898,7 @@ Item {
                 bordered: true
                 Layout.fillWidth: true
                 enabled: !actionProc.running && !root.displayBusy
-                  && (root.autoThemeActive || root.currentHasWallpaper)
+                  && (root.autoThemeActive || root.autoThemeHasSource)
                 onClicked: root.toggleAutoTheme()
               }
 
@@ -922,14 +926,13 @@ Item {
 
             Text {
               textFormat: Text.PlainText
-              Layout.fillWidth: true
-              visible: !root.engineRunning && !root.applyInFlight && root.statusMessage.length === 0
-              text: root.hasConfiguredDisplays
-                ? "Engine stopped — Start applies saved wallpapers to all displays."
-                : "No wallpapers configured — pick one on a display tab, then Apply."
+              Layout.preferredWidth: autoThemeButton.width
+              Layout.maximumWidth: autoThemeButton.width
+              text: "Auto-match: " + root.autoThemeHint
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
               wrapMode: Text.WordWrap
             }
 
@@ -1113,6 +1116,7 @@ Item {
                 model: root.displayCount
 
                 DisplayTab {
+                  id: displayTab
                   required property int index
 
                   anchors.fill: parent
@@ -1125,17 +1129,22 @@ Item {
                   pluginRoot: root.pluginRoot
                   tabActive: index === root.currentTabIndex && root.currentTabIndex >= 0
                   panelBusy: actionProc.running || root.displayBusy
-                  engineRunning: root.displayEngineRunning(displayName)
+                  engineRunning: root.displayEngineRunning(displayTab.displayName)
 
                   onRefreshNeeded: root.refresh()
                   onApplied: root.refresh()
                   onEditWallpaperFoldersRequested: root.openWallpaperFolders()
-                  onApplyBusyChanged: function(isBusy) {
+                  onActionBusyChanged: function(isBusy, actionKind) {
                     root.displayBusy = isBusy
                     if (isBusy) {
+                      var verb = "Working on"
+                      if (actionKind === "start") verb = "Starting"
+                      else if (actionKind === "stop") verb = "Stopping"
+                      else if (actionKind === "clear") verb = "Clearing"
+                      else if (actionKind === "apply") verb = "Applying to"
                       if (!root.busyAction.length)
-                        root.busyAction = "Applying…"
-                    } else if (root.busyAction === "Applying…" && !actionProc.running) {
+                        root.busyAction = verb + " " + displayTab.displayName + "…"
+                    } else if (!actionProc.running) {
                       root.busyAction = ""
                     }
                   }

@@ -99,19 +99,25 @@ other dependency.
 
 ### GUI (tab per display)
 
-Open it from the Style menu, bar widget, or `omarchy-we panel`. Each live Hyprland display gets its own tab. Choose a wallpaper, adjust its settings, and click **Apply**. **Clear** removes only that display's configuration.
+Open it from the Style menu, bar widget, or `omarchy-we panel`. Each live
+Hyprland display gets its own tab, with **Start** and **Stop** directly below it
+for that display's process. Choose a wallpaper, adjust its settings, and click
+**Save & apply**. **Clear** removes only that display's configuration.
 
 Use the folder button beside **Workshop Wallpapers** to add libraries from
 other disks. You can paste a Steam library directory, its `steamapps`
 directory, or the exact `workshop/content/431960` directory. Added folders are
 shared by every display and automatic Steam locations remain enabled.
 
-The controls above the tabs apply globally:
+The lifecycle controls below the selected tab are display-specific:
 
-- **Start:** start every configured display
-- **Stop:** stop all Wallpaper Engine processes owned by the plugin
+- **Start:** start the selected display's saved wallpaper process
+- **Stop:** stop only the selected display's process. If it is the final process and auto-match is active, restore the previously selected Omarchy theme.
+
+The theme controls above the tabs remain global:
+
 - **Revert to theme:** stop them and restore the Omarchy theme background
-- **Auto-match theme:** build and apply an accessible Omarchy palette from the selected display's rendered wallpaper. The button becomes **Undo theme match** and restores the previously selected theme.
+- **Auto-match theme:** build and apply an accessible Omarchy palette from the most recently successfully applied wallpaper, regardless of which display tab is selected. Until an apply has been recorded, the selected display is used. The button becomes **Undo theme match** and restores the previously selected theme.
 
 Auto-match writes only to the plugin-owned custom theme at
 `~/.config/omarchy/themes/wallpaper-engine-auto-match`. It refuses to overwrite

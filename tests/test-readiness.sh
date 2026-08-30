@@ -49,6 +49,61 @@ PY
     || fail "complete clear screenshot consumed ${elapsed}ms of a ${timeout_ms}ms timeout"
 }
 
+test_incremental_screenshot_is_rechecked_after_stabilizing() (
+  local screenshot="$TEST_ROOT/incremental.bmp"
+  local complete="$TEST_ROOT/incremental-complete.bmp"
+  local publish="$TEST_ROOT/publish-incremental"
+  local writer_pid first_probe=1
+
+  python3 - "$complete" <<'PY'
+import sys
+from PIL import Image
+
+image = Image.new("RGB", (32, 32), "black")
+image.putpixel((15, 15), (255, 0, 0))
+image.save(sys.argv[1])
+PY
+  head -c 64 "$complete" >"$screenshot"
+
+  we_file_is_image "$screenshot" \
+    || fail 'incremental fixture header was not recognized as an image'
+  if we_lwe_fbo_painted "$screenshot"; then
+    fail 'incomplete screenshot fixture was incorrectly considered painted'
+  fi
+
+  # Publish the remaining pixels immediately after the first paint probe. This
+  # deterministically recreates LWE extending a screenshot between the failed
+  # paint decode and the following valid-image check.
+  (
+    while [[ ! -e $publish ]]; do
+      sleep 0.005
+    done
+    dd if="$complete" of="$screenshot" bs=1 skip=64 seek=64 \
+      conv=notrunc status=none
+  ) &
+  writer_pid=$!
+
+  we_lwe_fbo_painted() {
+    local path=${1:-$WE_LWE_SCREENSHOT}
+    local eps=${2:-$WE_LWE_PAINT_EPS}
+    local rc=0
+    [[ -n $path && -f $path ]] || return 1
+    we_file_is_image "$path" || return 1
+    we_compose_py painted "$path" --epsilon "$eps" >/dev/null 2>&1 || rc=$?
+    if (( first_probe == 1 )); then
+      first_probe=0
+      : >"$publish"
+      wait "$writer_pid"
+    fi
+    return "$rc"
+  }
+
+  WE_LWE_SCREENSHOT="$screenshot"
+  if ! we_wait_engine_first_paint 1000 >/dev/null 2>&1; then
+    fail 'painted screenshot published during the readiness probe was rejected'
+  fi
+)
+
 test_readback_fallback_requires_replacement_layer() {
   local screenshot="$TEST_ROOT/readback-clear.png"
   local log_file="$TEST_ROOT/engine.DP-2.log"
@@ -115,7 +170,32 @@ EOF
   wait "$engine_pid" 2>/dev/null || true
 }
 
+test_last_applied_tracking() {
+  local first="$TEST_ROOT/last-applied-first.jpg"
+  local second="$TEST_ROOT/last-applied-second.jpg"
+  : >"$first"
+  : >"$second"
+  we_load_config
+
+  we_record_last_applied DP-1 wallpaper-a "$first"
+  jq -e --arg source "$(realpath "$first")" '
+    .last_applied.monitor == "DP-1"
+    and .last_applied.wallpaper == "wallpaper-a"
+    and .last_applied.source_image == $source
+  ' "$WE_CONFIG_FILE" >/dev/null \
+    || fail 'successful apply metadata was not recorded'
+
+  WE_PRESERVE_LAST_APPLIED=1 we_record_last_applied DP-2 wallpaper-b "$second"
+  jq -e '
+    .last_applied.monitor == "DP-1"
+    and .last_applied.wallpaper == "wallpaper-a"
+  ' "$WE_CONFIG_FILE" >/dev/null \
+    || fail 'boot-style apply replaced the interactive last-applied source'
+}
+
 test_complete_clear_screenshot_fails_fast
+test_incremental_screenshot_is_rechecked_after_stabilizing
 test_readback_fallback_requires_replacement_layer
+test_last_applied_tracking
 
 echo 'readiness regression tests: PASS'

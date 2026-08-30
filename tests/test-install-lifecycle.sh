@@ -96,6 +96,12 @@ test_qml_text_is_plain() {
   done
 }
 
+test_panel_badge_tracks_runtime_state() {
+  grep -Fq 'readonly property string statusLabel: engineRunning ? "Running" : "Stopped"' \
+    "$ROOT/Panel.qml" \
+    || fail 'panel status badge is not driven by live engine state'
+}
+
 test_legacy_preflight() {
   local home="$TEST_ROOT/legacy-home"
   local legacy="$home/.config/omarchy/plugins/$LEGACY_PLUGIN_ID"
@@ -218,6 +224,7 @@ test_uninstall_validates_all_paths_before_purge() {
 test_symlinked_cli
 test_additional_wallpaper_folders
 test_qml_text_is_plain
+test_panel_badge_tracks_runtime_state
 test_legacy_preflight
 test_uninstall_preserves_data
 test_uninstall_purges_data

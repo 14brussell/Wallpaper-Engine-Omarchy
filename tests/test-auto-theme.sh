@@ -74,10 +74,21 @@ env_cmd=(
 "${env_cmd[@]}" "$ROOT/bin/we" status --json >/dev/null
 config="$TEST_HOME/.config/omarchy/wallpaper-engine/config.json"
 tmp="$TEST_ROOT/config.tmp"
-jq '.displays["DP-1"] = {wallpaper:"123", scaling:"fill"}' "$config" >"$tmp"
+jq '
+  .displays["DP-0"] = {wallpaper:"old-wallpaper", scaling:"fill"}
+  | .displays["DP-1"] = {wallpaper:"123", scaling:"fill"}
+' "$config" >"$tmp"
 mv "$tmp" "$config"
 
-"${env_cmd[@]}" "$ROOT/bin/we" auto-theme DP-1 >/dev/null
+# Existing installs have no last_applied object. Status/config loading migrates
+# the newest confirmed framebuffer that still matches a configured wallpaper.
+"${env_cmd[@]}" "$ROOT/bin/we" status --json \
+  | jq -e '.lastAppliedMonitor == "DP-1" and .lastAppliedWallpaper == "123"' >/dev/null \
+  || fail 'last-applied wallpaper was not inferred for an existing config'
+
+# With no monitor argument, auto-match must use the most recently successfully
+# applied wallpaper rather than the first configured or currently selected tab.
+"${env_cmd[@]}" "$ROOT/bin/we" auto-theme >/dev/null
 generated="$TEST_HOME/.config/omarchy/themes/wallpaper-engine-auto-match"
 [[ -f $generated/colors.toml ]] || fail 'colors.toml was not generated'
 [[ -f $generated/backgrounds/wallpaper.jpg ]] || fail 'theme background was not generated'
@@ -89,9 +100,21 @@ jq -e --arg key "$current_wallpaper_key" \
   "$config" >/dev/null \
   || fail 'auto-theme reused a readiness image from a different wallpaper'
 "${env_cmd[@]}" "$ROOT/bin/we" status --json \
-  | jq -e '.autoThemeActive == true and .autoThemePrevious == "gruvbox"' >/dev/null \
-  || fail 'status did not expose active auto-theme state'
+  | jq -e '.autoThemeActive == true and .autoThemePrevious == "gruvbox"
+    and .lastAppliedMonitor == "DP-1" and .lastAppliedWallpaper == "123"' >/dev/null \
+  || fail 'status did not expose auto-theme and last-applied state'
 
+# Stopping the final Wallpaper Engine process must also undo auto-match. The
+# generated theme's parked background would otherwise be exposed as a blank
+# desktop after the live wallpaper disappears.
+"${env_cmd[@]}" "$ROOT/bin/we" stop DP-1 >/dev/null
+[[ $(<"$TEST_HOME/.local/state/omarchy/current/theme.name") == gruvbox ]] \
+  || fail 'stopping Wallpaper Engine did not restore the previous theme'
+jq -e '.auto_theme.active == false and .auto_theme.previous_theme == null' "$config" >/dev/null \
+  || fail 'stopping Wallpaper Engine did not clear auto-theme undo state'
+
+# The explicit undo action remains available while Wallpaper Engine is live.
+"${env_cmd[@]}" "$ROOT/bin/we" auto-theme DP-1 >/dev/null
 "${env_cmd[@]}" "$ROOT/bin/we" undo-auto-theme >/dev/null
 [[ $(<"$TEST_HOME/.local/state/omarchy/current/theme.name") == gruvbox ]] \
   || fail 'previous theme was not restored'

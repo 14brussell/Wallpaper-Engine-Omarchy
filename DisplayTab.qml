@@ -17,6 +17,8 @@ import qs.Ui
 //            [--no-audio-processing] [--disable-particles]
 //            [--disable-mouse] [--disable-parallax] [--property k=v …]
 //          Only --property keys listed for the *selected* wallpaper are sent.
+//   Start: we apply <mon>
+//   Stop:  we stop <mon>
 //   Apply: we set-display <mon> … && we apply <mon>
 //   Clear: we set-display <mon> --clear && we stop <mon>
 //
@@ -32,7 +34,7 @@ Item {
   property string pluginRoot: ""
   /** True while this tab is the visible StackLayout child. */
   property bool tabActive: false
-  /** Panel busy (global stop/revert) — disable Apply inside the tab. */
+  /** Panel busy (theme-wide action) — disable display actions inside the tab. */
   property bool panelBusy: false
   /** Live linux-wallpaperengine process (from panel status). */
   property bool engineRunning: false
@@ -43,13 +45,13 @@ Item {
   signal statusMessage(string text)
   signal loadFinished()
   signal errorOccurred(string message)
-  signal applyBusyChanged(bool busy)
+  signal actionBusyChanged(bool busy, string actionKind)
 
   // ---- Internal status -------------------------------------------------
   property bool loading: false
   property bool capsLoading: false
   property bool busy: false
-  onBusyChanged: root.applyBusyChanged(busy)
+  onBusyChanged: root.actionBusyChanged(busy, actionKind)
   property string localStatus: ""
   property bool configured: false
   property bool hasWallpaper: false
@@ -58,11 +60,11 @@ Item {
   /** Monotonic version of user-authored draft changes. Config reads capture
       this value and may bind only if the draft has not changed meanwhile. */
   property int draftRevision: 0
-  /** True while the controls contain changes not yet saved by Apply/Clear. */
+  /** True while the controls contain changes not yet saved by Save & apply/Clear. */
   property bool draftDirty: false
-  /** Draft revision captured by the current Apply/Clear transaction. */
+  /** Draft revision captured by the current Save & apply/Clear transaction. */
   property int actionDraftRevision: 0
-  /** Preserve an Apply click made while wallpaper capabilities are loading. */
+  /** Preserve a Save & apply click made while capabilities are loading. */
   property bool applyQueued: false
   property string queuedApplyWallpaperId: ""
   /** Coalesce reload requests that arrive while display-config is running. */
@@ -172,7 +174,7 @@ Item {
       applyQueued = false
       queuedApplyWallpaperId = ""
     }
-    // Drop the previous wallpaper's property bag immediately so Apply cannot
+    // Drop the previous wallpaper's property bag immediately so Save & apply cannot
     // pass stale --set-property keys (config accumulates them across wallpapers).
     if (id !== String(propertiesWallpaperId || "")) {
       properties = ({})
@@ -456,8 +458,8 @@ Item {
       failAction("we binary not found")
       return
     }
-    busy = true
     actionKind = kind
+    busy = true
     actionQueue = steps.slice(1)
     setStatus(status || "")
     launchWe(steps[0])
@@ -482,8 +484,8 @@ Item {
       applyQueued = true
       queuedApplyWallpaperId = String(selectedWallpaperId)
       setStatus(capsLoading
-        ? "Loading wallpaper properties — Apply queued"
-        : "Loading display settings — Apply queued")
+        ? "Loading wallpaper properties — Save & apply queued"
+        : "Loading display settings — Save & apply queued")
       return
     }
     actionDraftRevision = draftRevision
@@ -491,6 +493,31 @@ Item {
       [buildSetDisplayArgv(), [resolvedWeBin, "apply", displayName]],
       "apply",
       "Applying…")
+  }
+
+  function startDisplay() {
+    if (actionsBlocked || actionProc.running) return
+    if (!displayName || !displayName.length) {
+      setError("No display selected")
+      return
+    }
+    if (!configured || !hasWallpaper) {
+      setError("Save a wallpaper for this display first")
+      return
+    }
+    startWeChain(
+      [[resolvedWeBin, "apply", displayName]],
+      "start",
+      "Starting " + displayName + "…")
+  }
+
+  function stopDisplay() {
+    if (actionsBlocked || actionProc.running || !engineRunning) return
+    if (!displayName || !displayName.length) return
+    startWeChain(
+      [[resolvedWeBin, "stop", displayName]],
+      "stop",
+      "Stopping " + displayName + "…")
   }
 
   function clearDisplay() {
@@ -801,8 +828,12 @@ Item {
                 : ("Applied & started on " + root.displayName))
             else if (kind === "clear")
               root.setStatus("Cleared " + root.displayName)
+            else if (kind === "start")
+              root.setStatus("Started " + root.displayName)
+            else if (kind === "stop")
+              root.setStatus("Stopped " + root.displayName)
             else if (kind === "property")
-              root.setStatus("Property saved — Apply to go live")
+              root.setStatus("Property saved — use Save & apply to go live")
             if (kind === "apply" || kind === "clear")
               root.applied()
             root.refreshNeeded()
@@ -814,10 +845,13 @@ Item {
               root.setError(first + " — run: we doctor")
             } else if (kind === "apply") {
               root.setError(first.length ? first : "Apply failed — check we doctor / engine.log")
+            } else if (kind === "start") {
+              root.setError(first.length ? first : "Start failed — check we doctor / engine.log")
             } else if (first.length) {
               root.setError(first)
             } else {
-              root.setError(kind === "clear" ? "Clear failed" : "we failed")
+              root.setError(kind === "clear" ? "Clear failed"
+                : (kind === "stop" ? "Stop failed" : "we failed"))
             }
           }
         })
@@ -888,13 +922,92 @@ Item {
       if (root.busy)
         root.failAction(root.actionKind === "apply"
           ? "Apply timed out"
-          : "Timed out waiting for we")
+          : (root.actionKind === "start"
+            ? "Start timed out"
+            : (root.actionKind === "stop" ? "Stop timed out" : "Timed out waiting for we")))
     }
   }
 
-  // ---- Layout: wallpaper browser | settings ----------------------------
+  // ---- Layout: per-display lifecycle, then wallpaper browser | settings --
+  BorderSurface {
+      id: displayActions
+      anchors.top: parent.top
+      anchors.left: parent.left
+      anchors.right: parent.right
+      color: root.sectionFill
+      borderSpec: Border.controlSpec(
+        root.engineRunning ? "selected" : "normal", root.fg, Color.accent)
+      radius: Style.cornerRadius
+      implicitHeight: displayActionsRow.implicitHeight + Style.space(20)
+
+      RowLayout {
+        id: displayActionsRow
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.margins: Style.space(10)
+        spacing: Style.space(8)
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: Style.space(2)
+
+          Text {
+            textFormat: Text.PlainText
+            text: root.displayName + " · " + (root.engineRunning ? "Running" : "Stopped")
+            color: root.engineRunning ? Color.accent : root.fg
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            text: root.engineRunning
+              ? "Wallpaper Engine is running on this display only."
+              : (root.configured
+                ? "A saved wallpaper is ready to start on this display."
+                : "Choose a wallpaper below, then Save & apply.")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+        }
+
+        Button {
+          text: "Start"
+          iconText: "󰐊"
+          tooltipText: "Start the saved wallpaper on " + root.displayName
+          foreground: root.fg
+          accent: Color.accent
+          active: !root.engineRunning && root.configured
+          bordered: true
+          enabled: !root.actionsBlocked && root.displayName.length > 0
+            && root.configured && root.hasWallpaper && !root.engineRunning
+          onClicked: root.startDisplay()
+        }
+
+        Button {
+          text: "Stop"
+          iconText: "󰓛"
+          tooltipText: "Stop Wallpaper Engine on " + root.displayName
+          foreground: root.fg
+          bordered: true
+          enabled: !root.actionsBlocked && root.displayName.length > 0
+            && root.engineRunning
+          onClicked: root.stopDisplay()
+        }
+      }
+    }
+
   RowLayout {
-    anchors.fill: parent
+    anchors.top: displayActions.bottom
+    anchors.left: parent.left
+    anchors.right: parent.right
+    anchors.bottom: parent.bottom
+    anchors.topMargin: Style.space(10)
     spacing: Style.space(18)
 
     // ---- Left: wallpaper picker ----------------------------------------
@@ -1242,7 +1355,7 @@ Item {
                 textFormat: Text.PlainText
                 Layout.fillWidth: true
                 visible: root.hasWallpaper
-                text: "Editing saved settings for this display. Adjust, then Apply."
+                text: "Editing saved settings for this display. Adjust, then Save & apply."
                 color: root.dim
                 wrapMode: Text.WordWrap
                 font.family: root.fontFamily
@@ -1456,7 +1569,7 @@ Item {
               Text {
                 textFormat: Text.PlainText
                 Layout.fillWidth: true
-                text: "From project.json / --list-properties. Passed as --set-property on Apply. No global speed flag."
+                text: "From project.json / --list-properties. Passed as --set-property on Save & apply. No global speed flag."
                 color: root.dim
                 wrapMode: Text.WordWrap
                 font.family: root.fontFamily
@@ -1569,7 +1682,7 @@ Item {
                       text: root.propValueFor(modelData.key, modelData.value)
                       foreground: root.fg
                       font.family: root.fontFamily
-                      // Commit on every user edit. Apply buttons are not
+                      // Commit on every user edit. Action buttons are not
                       // focusable, so focus loss is not a reliable commit.
                       onTextEdited: root.setPropValue(modelData.key, text)
                     }
@@ -1753,7 +1866,7 @@ Item {
               spacing: Style.space(8)
 
               PanelSectionHeader {
-                text: "APPLY"
+                text: "SAVE SETTINGS"
                 foreground: root.fg
                 fontFamily: root.fontFamily
               }
@@ -1763,7 +1876,7 @@ Item {
                 spacing: Style.space(8)
 
                 Button {
-                  text: root.engineRunning ? "Apply" : "Apply & start"
+                  text: "Save & apply"
                   iconText: "󰐊"
                   foreground: root.fg
                   accent: Color.accent
@@ -1788,7 +1901,7 @@ Item {
                 textFormat: Text.PlainText
                 Layout.fillWidth: true
                 visible: !root.busy && !root.wallpaperSelected
-                text: "Select a wallpaper, then Apply to save settings and start the engine."
+                text: "Select a wallpaper, then Save & apply to update and start this display."
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -1799,7 +1912,7 @@ Item {
                 textFormat: Text.PlainText
                 Layout.fillWidth: true
                 visible: !root.busy && root.wallpaperSelected && !root.engineRunning
-                text: "Saves and starts this display only. Other displays keep running unchanged."
+                text: "Saves these settings and starts this display only. Other displays remain unchanged."
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -1812,6 +1925,8 @@ Item {
                 visible: root.busy || root.localStatus.length > 0
                 text: {
                   if (!root.busy) return root.localStatus
+                  if (root.actionKind === "start") return "Starting…"
+                  if (root.actionKind === "stop") return "Stopping…"
                   if (root.actionKind === "clear") return "Clearing…"
                   if (root.actionKind === "property") return "Saving…"
                   return "Applying…"
@@ -1826,5 +1941,5 @@ Item {
         }
       }
     }
-  }
+}
 }

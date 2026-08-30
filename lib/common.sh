@@ -82,6 +82,11 @@ we_default_config_json() {
   "displays": {},
   "active": false,
   "saved_theme_background": null,
+  "last_applied": {
+    "monitor": null,
+    "wallpaper": null,
+    "source_image": null
+  },
   "auto_theme": {
     "active": false,
     "previous_theme": null,
@@ -111,6 +116,11 @@ we_load_config() {
   layer=$(jq -r '.defaults.layer // empty' "$WE_CONFIG_FILE" 2>/dev/null || true)
   if [[ $layer == background ]]; then
     we_jq_write '.defaults.layer = "bottom"'
+  fi
+  # Older configs predate explicit apply recency. Recover it once from the
+  # newest confirmed framebuffer whose monitor + wallpaper still match config.
+  if declare -F we_ensure_last_applied >/dev/null 2>&1; then
+    we_ensure_last_applied || true
   fi
 }
 
@@ -762,6 +772,8 @@ we_status_json() {
       workshopDirs: ($config.workshop_dirs // []),
       extraWallpaperDirs: ($config.extra_wallpaper_dirs // []),
       savedThemeBackground: ($config.saved_theme_background // null),
+      lastAppliedMonitor: ($config.last_applied.monitor // null),
+      lastAppliedWallpaper: ($config.last_applied.wallpaper // null),
       autoThemeActive: (($config.auto_theme.active // false) and ($theme == $autoThemeSlug)),
       autoThemePrevious: ($config.auto_theme.previous_theme // null),
       autoThemeSourceMonitor: ($config.auto_theme.source_monitor // null)
@@ -960,6 +972,15 @@ we_bg_queue_enter() {
     return 1
   fi
   WE_BG_QUEUE_HELD=1
+}
+
+we_bg_queue_leave() {
+  if [[ ${WE_BG_QUEUE_HELD:-0} -ne 1 ]]; then
+    return 0
+  fi
+  flock -u 9 2>/dev/null || true
+  exec 9>&-
+  WE_BG_QUEUE_HELD=0
 }
 
 we_transition_log() {
@@ -1361,14 +1382,18 @@ we_wait_lwe_readback_grace() {
 
 # Overlay still shows TO. hyprctl map/alpha is not a paint signal.
 # Poll until the one-shot FBO screenshot exists and is complete. A structured
-# image is confirmed paint; a valid clear image fails immediately unless the
-# exact guarded readback fallback above succeeds. Return 1 at WE_LWE_READY_MS
-# for a missing/incomplete image. Optional identity, monitor, and log arguments
-# let per-display replacements use the fallback and fail if LWE exits.
+# image is confirmed paint. Before treating a valid clear image as final, its
+# size/mtime/inode must stay unchanged across polls and the paint probe must be
+# repeated; LWE writes the screenshot in place, so a decoder can observe valid
+# metadata while the pixels are still arriving. A stable clear image fails
+# unless the exact guarded readback fallback above succeeds. Return 1 at
+# WE_LWE_READY_MS for a missing/incomplete image. Optional identity, monitor,
+# and log arguments let per-display replacements use the fallback and fail if
+# LWE exits.
 we_wait_engine_first_paint() {
   local timeout=${1:-$WE_LWE_READY_MS}
   local engine_pid=${2:-} engine_start=${3:-} monitor=${4:-} log_file=${5:-}
-  local start now
+  local start now clear_signature="" signature confirmed_signature
   start=$(we_now_ms)
   we_transition_log "polling LWE FBO $WE_LWE_SCREENSHOT (max ${timeout}ms; require structure or guarded readback fallback)"
   while true; do
@@ -1377,13 +1402,27 @@ we_wait_engine_first_paint() {
       return 0
     fi
     if [[ -f $WE_LWE_SCREENSHOT ]] && we_file_is_image "$WE_LWE_SCREENSHOT"; then
-      if [[ -n $engine_pid && -n $engine_start && -n $monitor && -n $log_file ]] \
-        && we_wait_lwe_readback_grace \
-          "$engine_pid" "$engine_start" "$monitor" "$log_file"; then
-        return 0
+      signature=$(stat -Lc '%s:%y:%i' "$WE_LWE_SCREENSHOT" 2>/dev/null || true)
+      if [[ -n $signature && $signature == "$clear_signature" ]]; then
+        if we_lwe_fbo_painted; then
+          we_transition_log "LWE FBO painted after stable-file confirmation"
+          return 0
+        fi
+        confirmed_signature=$(stat -Lc '%s:%y:%i' "$WE_LWE_SCREENSHOT" 2>/dev/null || true)
+        if [[ $confirmed_signature == "$signature" ]] \
+          && we_file_is_image "$WE_LWE_SCREENSHOT"; then
+          if [[ -n $engine_pid && -n $engine_start && -n $monitor && -n $log_file ]] \
+            && we_wait_lwe_readback_grace \
+              "$engine_pid" "$engine_start" "$monitor" "$log_file"; then
+            return 0
+          fi
+          we_transition_log "LWE FBO is a complete stable clear image; one-shot readiness probe failed"
+          return 1
+        fi
       fi
-      we_transition_log "LWE FBO is a complete clear image; one-shot readiness probe failed"
-      return 1
+      clear_signature=$signature
+    else
+      clear_signature=""
     fi
     if [[ -n $engine_pid && -n $engine_start ]] \
       && ! we_is_engine_pid "$engine_pid" "$engine_start"; then
@@ -2770,6 +2809,71 @@ we_restore_non_placeholder_background() {
   fi
 }
 
+we_infer_last_applied_json() {
+  local monitor wallpaper key wallpaper_key candidate base stamp
+  local best_stamp=0 best_monitor="" best_wallpaper="" best_source=""
+  while IFS= read -r monitor; do
+    [[ -n $monitor ]] || continue
+    wallpaper=$(we_display_wallpaper "$monitor")
+    [[ -n $wallpaper ]] || continue
+    key=$(we_monitor_key "$monitor")
+    wallpaper_key=$(we_wallpaper_key "$wallpaper")
+    candidate=$(find "$WE_STATE_DIR" -maxdepth 1 -type f \
+      -name "lwe-ready.${key}.${wallpaper_key}.*.jpg" \
+      -printf '%T@\t%p\n' 2>/dev/null | sort -nr | head -n1 | cut -f2-)
+    [[ -n $candidate && -f $candidate ]] || continue
+    base=${candidate%.jpg}
+    stamp=${base##*.}
+    [[ $stamp =~ ^[0-9]+$ ]] || continue
+    if (( stamp > best_stamp )); then
+      best_stamp=$stamp
+      best_monitor=$monitor
+      best_wallpaper=$wallpaper
+      best_source=$(realpath "$candidate")
+    fi
+  done < <(we_configured_monitors)
+  [[ -n $best_monitor && -n $best_source ]] || return 1
+  jq -n \
+    --arg monitor "$best_monitor" \
+    --arg wallpaper "$best_wallpaper" \
+    --arg source "$best_source" \
+    --argjson applied_at "$best_stamp" \
+    '{
+      monitor: $monitor,
+      wallpaper: $wallpaper,
+      source_image: $source,
+      applied_at: $applied_at
+    }'
+}
+
+we_ensure_last_applied() {
+  local inferred
+  if [[ -n $(we_jq -r '.last_applied.monitor // empty') ]]; then
+    return 0
+  fi
+  inferred=$(we_infer_last_applied_json) || return 1
+  we_jq_write --argjson inferred "$inferred" '.last_applied = $inferred'
+}
+
+we_record_last_applied() {
+  local monitor=${1:-} wallpaper=${2:-} source=${3:-} applied_at
+  [[ ${WE_PRESERVE_LAST_APPLIED:-0} != 1 ]] || return 0
+  [[ -n $monitor && -n $wallpaper && -n $source && -f $source ]] || return 1
+  source=$(realpath "$source")
+  applied_at=$(we_now_ms)
+  we_jq_write \
+    --arg monitor "$monitor" \
+    --arg wallpaper "$wallpaper" \
+    --arg source "$source" \
+    --argjson applied_at "$applied_at" \
+    '.last_applied = {
+      monitor: $monitor,
+      wallpaper: $wallpaper,
+      source_image: $source,
+      applied_at: $applied_at
+    }'
+}
+
 we_start_engine_monitor() {
   local monitor=$1 wallpaper resolved key wallpaper_key pid_file log_file old_identity
   local screenshot engine_pid engine_start pid_ready=false pid_tmp i
@@ -2863,6 +2967,8 @@ we_start_engine_monitor() {
   we_terminate_identity "$old_identity"
   find "$WE_STATE_DIR" -maxdepth 1 -type f -name "lwe-ready.${key}.*.jpg" \
     ! -path "$screenshot" -delete 2>/dev/null || true
+  we_record_last_applied "$monitor" "$wallpaper" "$screenshot" \
+    || we_runtime_log "could not record last applied wallpaper for $monitor"
   we_runtime_log "display $monitor ready pid=$engine_pid wallpaper=$wallpaper"
 }
 
@@ -2876,7 +2982,8 @@ we_start_engine() {
   we_ensure_omarchy_background_enabled
 
   local -a targets=()
-  local monitor rc=0 successes=0 legacy_identity="" migration=false
+  local monitor rc=0 successes=0 legacy_identity="" migration=false previous_last_applied
+  previous_last_applied=$(we_jq -c '.last_applied // {monitor:null, wallpaper:null, source_image:null}')
   legacy_identity=$(we_owned_pid_identity "$WE_PID_FILE" 2>/dev/null || true)
   if [[ -n $legacy_identity ]]; then
     # Upgrade the old shared runtime without blanking either output. Build and
@@ -2917,6 +3024,7 @@ we_start_engine() {
       for monitor in "${targets[@]}"; do
         we_stop_engine_monitor "$monitor"
       done
+      we_jq_write --argjson previous "$previous_last_applied" '.last_applied = $previous'
       we_sync_active_state
       echo "Could not migrate the shared wallpaper process; the previous wallpapers remain running." >&2
       we_notify "Wallpaper Engine migration failed safely"
@@ -2933,12 +3041,17 @@ we_start_engine() {
 }
 
 we_auto_theme_source_image() {
-  local monitor=${1:-} key wallpaper_key latest wallpaper resolved geometry width height rendered preview
+  local monitor=${1:-} wallpaper=${2:-} preferred_source=${3:-}
+  local key wallpaper_key latest resolved geometry width height rendered preview
   [[ -n $monitor ]] || {
     echo "No display was selected for auto-match." >&2
     return 1
   }
-  wallpaper=$(we_display_wallpaper "$monitor")
+  if [[ -n $preferred_source && -f $preferred_source ]]; then
+    printf '%s\n' "$(realpath "$preferred_source")"
+    return 0
+  fi
+  [[ -n $wallpaper ]] || wallpaper=$(we_display_wallpaper "$monitor")
   [[ -n $wallpaper ]] || {
     echo "Display $monitor has no wallpaper configured. Pick and apply one first." >&2
     return 1
@@ -2993,7 +3106,18 @@ we_theme_exists() {
 we_apply_auto_theme() {
   we_load_config
   local monitor=${1:-} current previous source stage backup old_state applied_theme
-  [[ -n $monitor ]] || monitor=$(we_configured_monitors | head -n1)
+  local last_applied wallpaper_override="" preferred_source=""
+  if [[ -z $monitor ]]; then
+    last_applied=$(we_jq -c '.last_applied // {}')
+    monitor=$(jq -r '.monitor // empty' <<<"$last_applied")
+    wallpaper_override=$(jq -r '.wallpaper // empty' <<<"$last_applied")
+    preferred_source=$(jq -r '.source_image // empty' <<<"$last_applied")
+    if [[ -z $monitor ]]; then
+      monitor=$(we_configured_monitors | head -n1)
+      wallpaper_override=""
+      preferred_source=""
+    fi
+  fi
   [[ -x $WE_THEME_GENERATOR || -f $WE_THEME_GENERATOR ]] || {
     echo "Auto-theme generator is missing: $WE_THEME_GENERATOR" >&2
     return 1
@@ -3021,7 +3145,8 @@ we_apply_auto_theme() {
     return 1
   }
 
-  source=$(we_auto_theme_source_image "$monitor") || return 1
+  source=$(we_auto_theme_source_image \
+    "$monitor" "$wallpaper_override" "$preferred_source") || return 1
   mkdir -p "$WE_USER_THEMES_DIR"
   if [[ -e $WE_AUTO_THEME_DIR && ! -f $WE_AUTO_THEME_DIR/.wallpaper-engine-omarchy-generated ]]; then
     echo "Refusing to overwrite non-plugin theme: $WE_AUTO_THEME_DIR" >&2
