@@ -99,6 +99,23 @@ remove_owned_hook() {
   fi
 }
 
+stop_monitor_watch() {
+  local unit=wallpaper-engine-monitor-watch
+  local pidfile="$STATE_DIR/monitor-watch.pid"
+  local pid
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user stop "$unit" 2>/dev/null || true
+    systemctl --user reset-failed "$unit" 2>/dev/null || true
+  fi
+  if [[ -f $pidfile ]]; then
+    pid=$(<"$pidfile")
+    if [[ $pid =~ ^[1-9][0-9]*$ ]]; then
+      kill -- "$pid" 2>/dev/null || true
+    fi
+    rm -f -- "$pidfile"
+  fi
+}
+
 remove_owned_menu_entries() {
   [[ -f $MENU_FILE ]] || return 0
   WE_MENU_FILE=$MENU_FILE WE_SKIP_MENU_REFRESH=${WE_SKIP_MENU_REFRESH:-0} \
@@ -212,6 +229,7 @@ main() {
 
   remove_owned_hook "$HOOKS_ROOT/post-boot.d/50-wallpaper-engine"
   remove_owned_hook "$HOOKS_ROOT/theme-set.d/50-wallpaper-engine"
+  stop_monitor_watch
   remove_owned_menu_entries
   remove_owned_link "$BIN_DIR/omarchy-we"
   remove_owned_link "$BIN_DIR/we-omarchy"

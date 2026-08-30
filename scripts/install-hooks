@@ -50,6 +50,7 @@ write_hook() {
 install_hooks() {
   write_hook "$ROOT/hooks/post-boot.sh" "$POST_BOOT"
   write_hook "$ROOT/hooks/theme-set.sh" "$THEME_SET"
+  "$ROOT/hooks/monitor-watch.sh" --ensure >/dev/null 2>&1 || true
 
   echo "Installed hooks:"
   echo "  $POST_BOOT"

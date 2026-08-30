@@ -194,7 +194,9 @@ WE:      linux-wallpaperengine --layer bottom         (covers the static layer)
 
 Each configured display has its own `linux-wallpaperengine` process. Applying a wallpaper starts a replacement, waits for its first rendered frame, then stops the old process. If startup fails, the previous wallpaper stays visible. Other displays are unaffected.
 
-`we apply` starts every configured display independently. `we apply <monitor>` updates only one. If a Scene exits before rendering, the plugin retries once with particles disabled and saves that setting if the retry succeeds.
+`we apply` starts every *live* configured display independently. Disconnected or lid-disabled outputs are skipped so apply and post-boot do not wait 15s per stale head. `we apply <monitor>` updates only one live output. If a Scene exits before rendering, the plugin retries once with particles disabled and saves that setting if the retry succeeds.
+
+A Hyprland socket watcher (same `monitoraddedv2` / `monitorremovedv2` events as Omarchy's monitor-watch) starts a configured engine when that output returns and stops it when the output disappears, without replacing Omarchy's clamshell watcher. Leave `omarchy.background` enabled.
 
 Optional readiness tuning: `WE_LWE_READY_MS`, `WE_LWE_READBACK_GRACE_MS`, and
 `WE_LWE_PAINT_EPS`. `WE_LWE_SCREENSHOT_DELAY` is limited to 0–5 frames by the
@@ -202,7 +204,7 @@ current linux-wallpaperengine release and defaults to that upstream maximum.
 
 ### Hooks
 
-- `post-boot.d/50-wallpaper-engine` restarts saved wallpapers when `active=true`.
+- `post-boot.d/50-wallpaper-engine` restarts saved wallpapers when `active=true`, and starts a Hyprland monitor watcher so dock/lid/HDMI changes can start or stop per-output engines.
 - `theme-set.d/50-wallpaper-engine` records the new theme background for the next revert.
 
 Install them with `we install-hooks`.
@@ -266,7 +268,7 @@ bin/we                       CLI
 lib/common.sh                Engine and theme integration
 lib/generate_theme.py        Wallpaper palette generator
 scripts/                     Installer, TUI, and menu helpers
-hooks/                       Boot and theme hooks
+hooks/                       Boot, theme, and Hyprland monitor-watch hooks
 ```
 
 ## Limitations

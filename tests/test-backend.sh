@@ -124,6 +124,7 @@ EOF
 
   start=$(date +%s%N)
   env HOME="$home" PATH="$stub_bin:$PATH" \
+    HYPRLAND_INSTANCE_SIGNATURE= \
     WE_POST_BOOT_APPLY_BIN="$apply_stub" \
     WE_TEST_POST_BOOT_MARKER="$marker" \
     "$ROOT/hooks/post-boot.sh"

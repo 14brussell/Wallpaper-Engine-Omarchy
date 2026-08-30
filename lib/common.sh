@@ -307,7 +307,7 @@ we_monitors_json() {
   if command -v hyprctl >/dev/null 2>&1; then
     local out
     out=$(timeout -k 1 "${WE_HYPRCTL_TIMEOUT_S:-2}" hyprctl monitors -j 2>/dev/null | jq -c '
-      [.[] | {
+      [.[] | select(.disabled != true) | {
         name: .name,
         width: (.width // null),
         height: (.height // null),
@@ -723,6 +723,87 @@ we_wallpaper_capabilities_json() {
 # Monitors that have a wallpaper assigned in config (order stable by key).
 we_configured_monitors() {
   we_jq -r '.displays | to_entries[] | select(.value.wallpaper != null and (.value.wallpaper | tostring) != "") | .key'
+}
+
+# Connector names currently enabled in the compositor. Unplugged and
+# lid-disabled heads are omitted (`hyprctl monitors`, not `monitors all`).
+we_live_monitor_names() {
+  we_list_monitors 2>/dev/null || true
+}
+
+# Configured wallpapers whose outputs are currently live. Bare apply uses this
+# so disconnected heads do not each consume WE_LWE_READY_MS.
+we_configured_live_monitors() {
+  local -a live=()
+  local m
+  mapfile -t live < <(we_live_monitor_names)
+  ((${#live[@]} > 0)) || return 0
+  while IFS= read -r m; do
+    [[ -n $m ]] || continue
+    we_name_in_list "$m" "${live[@]}" && printf '%s\n' "$m"
+  done < <(we_configured_monitors)
+  return 0
+}
+
+# Keep a Hyprland socket watcher so dock/lid/hotplug can start or stop engines.
+# No-op outside a Hyprland session. Never disables omarchy.background.
+we_ensure_monitor_watch() {
+  local script="$WE_PLUGIN_ROOT/hooks/monitor-watch.sh"
+  [[ -f $script ]] || return 0
+  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || return 0
+  bash "$script" --ensure >/dev/null 2>&1 || true
+}
+
+# When active=true, start configured engines for newly live outputs and stop
+# engines whose outputs have disappeared. Does not clear .active on unplug so a
+# later dock/lid-open can restore without a manual apply.
+we_reconcile_live_outputs() {
+  we_load_config
+  [[ $(we_jq -r '.active // false') == true ]] || return 0
+
+  local -a live=() configured=() to_start=()
+  local m key f identity pid_file matched live_name
+  mapfile -t live < <(we_live_monitor_names)
+  mapfile -t configured < <(we_configured_monitors)
+
+  we_bg_queue_enter || {
+    we_runtime_log "output reconcile skipped: transition busy"
+    return 0
+  }
+
+  shopt -s nullglob
+  for f in "$WE_PID_DIR"/*.pid; do
+    key=${f##*/}
+    key=${key%.pid}
+    matched=false
+    for live_name in "${live[@]}"; do
+      [[ -n $live_name ]] || continue
+      if [[ $(we_monitor_key "$live_name") == "$key" ]]; then
+        matched=true
+        break
+      fi
+    done
+    if ! $matched; then
+      we_runtime_log "stopping engine for disconnected output $key"
+      we_stop_engine_monitor "$key"
+    fi
+  done
+  shopt -u nullglob
+
+  for m in "${configured[@]}"; do
+    [[ -n $m ]] || continue
+    ((${#live[@]} > 0)) && we_name_in_list "$m" "${live[@]}" || continue
+    pid_file=$(we_monitor_pid_file "$m")
+    identity=$(we_owned_pid_identity "$pid_file" 2>/dev/null || true)
+    [[ -z $identity ]] || continue
+    to_start+=("$m")
+  done
+
+  if ((${#to_start[@]} > 0)); then
+    we_runtime_log "hotplug start targets=${to_start[*]}"
+    we_start_engine "${to_start[@]}"
+  fi
+  return 0
 }
 
 # Effective settings for one display: display overrides merged over defaults.
@@ -2854,28 +2935,50 @@ we_start_engine() {
     return 1
   }
   we_ensure_omarchy_background_enabled
+  we_ensure_monitor_watch
 
-  local -a targets=()
-  local monitor rc=0 successes=0 legacy_identity="" migration=false previous_last_applied
+  local -a targets=() configured=() skipped=()
+  local monitor rc=0 successes=0 legacy_identity="" migration=false previous_last_applied named=0
+  (($#)) && named=1
   previous_last_applied=$(we_jq -c '.last_applied // {monitor:null, wallpaper:null, source_image:null}')
+  mapfile -t configured < <(we_configured_monitors)
   legacy_identity=$(we_owned_pid_identity "$WE_PID_FILE" 2>/dev/null || true)
   if [[ -n $legacy_identity ]]; then
     # Upgrade the old shared runtime without blanking either output. Build and
     # validate every configured replacement while the shared process remains
     # visible; retire it only after all replacements are ready.
     migration=true
-    mapfile -t targets < <(we_configured_monitors)
-  elif (($#)); then
+    mapfile -t targets < <(we_configured_live_monitors)
+  elif (( named )); then
     rm -f "$WE_PID_FILE"
     targets=("$@")
   else
     rm -f "$WE_PID_FILE"
-    mapfile -t targets < <(we_configured_monitors)
+    mapfile -t targets < <(we_configured_live_monitors)
   fi
-  ((${#targets[@]})) || {
+
+  if (( ! named )); then
+    for monitor in "${configured[@]}"; do
+      [[ -n $monitor ]] || continue
+      if ((${#targets[@]} == 0)) || ! we_name_in_list "$monitor" "${targets[@]}"; then
+        skipped+=("$monitor")
+      fi
+    done
+    for monitor in "${skipped[@]}"; do
+      we_runtime_log "skipping disconnected output $monitor"
+      echo "Skipping disconnected display $monitor (not reported by hyprctl)" >&2
+    done
+  fi
+
+  if ((${#targets[@]} == 0)); then
+    if ((${#configured[@]} > 0)); then
+      we_runtime_log "no live outputs among configured displays; leaving active state unchanged"
+      echo "No live displays to apply (configured outputs are disconnected)." >&2
+      return 0
+    fi
     echo "No displays configured. Select a wallpaper first." >&2
     return 1
-  }
+  fi
 
   we_save_theme_background_if_needed
   we_restore_non_placeholder_background
