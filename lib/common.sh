@@ -748,6 +748,22 @@ we_live_monitor_names() {
   we_list_monitors 2>/dev/null || true
 }
 
+# Stable, order-independent representation of the compositor's live outputs.
+# Hotplug profile managers can briefly publish a valid intermediate layout, so
+# a single successful hyprctl probe is not sufficient before starting LWE.
+we_live_monitor_set_json() {
+  we_live_monitor_names | jq -Rsc 'split("\n") | map(select(length > 0)) | sort | unique'
+}
+
+we_monitor_is_live() {
+  local monitor=${1:-} live
+  [[ -n $monitor ]] || return 1
+  while IFS= read -r live; do
+    [[ $live == "$monitor" ]] && return 0
+  done < <(we_live_monitor_names)
+  return 1
+}
+
 # Configured wallpapers whose outputs are currently live. Bare apply uses this
 # so disconnected heads do not each consume WE_LWE_READY_MS.
 we_configured_live_monitors() {
@@ -779,7 +795,7 @@ we_reconcile_live_outputs() {
   [[ $(we_jq -r '.active // false') == true ]] || return 0
 
   local -a live=() configured=() to_start=()
-  local m key f identity pid_file matched live_name
+  local m key f identity pid_file matched live_name live_before live_after
   mapfile -t live < <(we_live_monitor_names)
   # hyprctl reload (omarchy-theme-set) can report zero heads for a beat.
   # Treating that as "every output vanished" SIGTERMs live engines and lets
@@ -830,6 +846,23 @@ we_reconcile_live_outputs() {
   done
 
   if ((${#to_start[@]} > 0)); then
+    # A monitor add can be an intermediate display profile which is removed a
+    # moment later. Starting LWE in that window exposes an upstream Wayland
+    # viewport use-after-free when the layer closes with a frame callback
+    # queued. Keep removals responsive above, but require the complete live set
+    # to remain unchanged before spawning any new renderer.
+    live_before=$(printf '%s\n' "${live[@]}" \
+      | jq -Rsc 'split("\n") | map(select(length > 0)) | sort | unique')
+    local settle_ms=${WE_HOTPLUG_START_SETTLE_MS:-3000}
+    if [[ $settle_ms =~ ^[0-9]+$ ]] && (( settle_ms > 0 )); then
+      we_runtime_log "hotplug start waiting for ${settle_ms}ms stable outputs: ${to_start[*]}"
+      we_wait_ms "$settle_ms"
+      live_after=$(we_live_monitor_set_json)
+      if [[ $live_after != "$live_before" ]]; then
+        we_runtime_log "hotplug start skipped: live outputs changed during settle window"
+        return 0
+      fi
+    fi
     we_runtime_log "hotplug start targets=${to_start[*]}"
     we_start_engine "${to_start[@]}"
   fi
@@ -3036,6 +3069,7 @@ we_start_engine_monitor() {
     # when that compatibility attempt renders successfully, so later applies
     # do not generate another core dump for the same wallpaper.
     if ! $engine_alive && [[ $project_type == scene ]] \
+      && we_monitor_is_live "$monitor" \
       && [[ $particles_disabled != true && $particles_disabled != True ]]; then
       we_runtime_log "display $monitor engine exited before first paint; retrying wallpaper=$wallpaper with particles disabled"
       we_jq_write --arg m "$monitor" '.displays[$m].disable_particles = true'

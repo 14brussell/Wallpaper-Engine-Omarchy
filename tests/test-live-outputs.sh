@@ -14,6 +14,7 @@ fail() {
 HOME="$TEST_ROOT/home"
 XDG_CONFIG_HOME="$HOME/.config"
 XDG_STATE_HOME="$HOME/.local/state"
+WE_HOTPLUG_START_SETTLE_MS=0
 unset HYPRLAND_INSTANCE_SIGNATURE || true
 mkdir -p "$HOME"
 
@@ -166,6 +167,37 @@ test_hotplug_start_and_stop() {
   [[ ! -s $start_log ]] || fail 'inactive session still started engines on hotplug'
 }
 
+test_unstable_hotplug_set_is_not_started() (
+  seed_two_displays
+  we_ensure_dirs
+  local start_log="$TEST_ROOT/unstable-start.log"
+  local monitor_state="$TEST_ROOT/unstable-monitors.json"
+  local stub_bin="$TEST_ROOT/unstable-bin"
+  stub_engine_start "$start_log"
+
+  mkdir -p "$stub_bin"
+  cat >"$stub_bin/hyprctl" <<'EOF'
+#!/usr/bin/env bash
+[[ ${1:-} == monitors && ${2:-} == -j ]] || exit 2
+cat "$WE_TEST_MONITOR_STATE"
+EOF
+  chmod +x "$stub_bin/hyprctl"
+  PATH="$stub_bin:$PATH"
+  export WE_TEST_MONITOR_STATE="$monitor_state"
+  printf '%s\n' '[{"name":"DP-1","width":1920,"height":1080},{"name":"HDMI-A-1","width":2560,"height":1440}]' \
+    >"$monitor_state"
+
+  # Simulate the display profile changing while the hotplug start is settling.
+  WE_HOTPLUG_START_SETTLE_MS=1
+  we_wait_ms() {
+    printf '%s\n' '[{"name":"DP-1","width":1920,"height":1080}]' >"$monitor_state"
+  }
+
+  we_reconcile_live_outputs
+  [[ ! -s $start_log ]] \
+    || fail "unstable hotplug started renderers: $(cat "$start_log")"
+)
+
 test_empty_live_outputs_do_not_stop_engines() {
   seed_two_displays
   we_ensure_dirs
@@ -191,13 +223,20 @@ test_monitor_watch_ignores_config_reload() {
   fi
 }
 
+test_monitor_watch_can_cancel_active_reconcile() {
+  grep -Fq 'exec "$ROOT/bin/we" sync-outputs' "$ROOT/hooks/monitor-watch.sh" \
+    || fail 'monitor-watch does not replace its debounce child with the cancellable reconcile'
+}
+
 test_configured_but_not_live_is_skipped
 test_all_disconnected_skips_without_clearing_active
 test_empty_live_outputs_do_not_stop_engines
 test_disabled_hyprctl_head_is_not_live
 test_named_apply_rejects_disconnected
 test_hotplug_start_and_stop
+test_unstable_hotplug_set_is_not_started
 test_monitor_watch_ensure_is_noop_without_hyprland
 test_monitor_watch_ignores_config_reload
+test_monitor_watch_can_cancel_active_reconcile
 
 echo 'live-output regression tests: PASS'

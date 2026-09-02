@@ -132,7 +132,10 @@ kick_reconcile() {
   fi
   (
     sleep "$WE_MONITOR_WATCH_DEBOUNCE_S"
-    "$ROOT/bin/we" sync-outputs || true
+    # Replace this child with `we` so a newer monitor event terminates the
+    # actual reconcile. Its lifecycle trap then reaps any renderer which was
+    # spawned but had not yet passed first-paint validation.
+    exec "$ROOT/bin/we" sync-outputs
   ) &
   debounce_pid=$!
 }

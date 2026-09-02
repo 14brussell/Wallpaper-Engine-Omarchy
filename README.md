@@ -116,7 +116,7 @@ omarchy-we set-wallpaper-dirs <path>…
 - `~/.config/omarchy/hooks/post-boot.d/50-wallpaper-engine` — if `active=true`, restore saved wallpapers; `--ensure`s monitor-watch
 - `~/.config/omarchy/hooks/theme-set.d/50-wallpaper-engine` — remember the real theme background for revert; does **not** tear down a live wallpaper
 
-**monitor-watch is not a third Omarchy hook.** Post-boot starts it. It listens for Hyprland `monitoraddedv2` / `monitorremovedv2` and runs `omarchy-we sync-outputs`. It does **not** reconcile on `configreloaded` (that was tearing down live engines). Does not replace Omarchy’s clamshell watcher.
+**monitor-watch is not a third Omarchy hook.** Post-boot starts it. It listens for Hyprland `monitoraddedv2` / `monitorremovedv2` and runs `omarchy-we sync-outputs`. Newly added outputs must remain stable for three seconds before their renderer starts, avoiding transient dock/profile layouts. It does **not** reconcile on `configreloaded` (that was tearing down live engines). Does not replace Omarchy’s clamshell watcher.
 
 - Config: `~/.config/omarchy/wallpaper-engine/config.json`
 - State / logs: `~/.local/state/omarchy/wallpaper-engine/`
